@@ -1,36 +1,93 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# VIRAL.forge
 
-## Getting Started
+Anything viral becomes a coin. A prompt, an X post, a hashtag, an image, a TikTok
+or a trending topic goes in; an AI-forged name, ticker, lore and pixel logo come
+out, ready to launch on Solana.
 
-First, run the development server:
+This is an independent reimplementation of the interaction model and information
+architecture of [launcher.wtf](https://www.launcher.wtf/) — built from scratch,
+with its own design system, copy and code. It is not affiliated with, endorsed
+by, or derived from launcher.wtf's source.
+
+## Stack
+
+- **Next.js 16.4** (App Router, Turbopack, Cache Components) and **React 19.3**
+- **TypeScript** end to end
+- **Tailwind CSS 4** driven by a custom design-token layer in `src/app/globals.css`
+- **zod** for request validation on every mutating API route
+- **Vitest** for unit tests
+
+## Routes
+
+| Route | Purpose |
+| --- | --- |
+| `/` | Hero, forge composer, live counts, recent launches, radar panel |
+| `/coins` | Launch history with `all` / `live` / `simulated` / `radar` / `manual` filters |
+| `/coin/<mint>` | Coin detail: logo, lore, tags, mint, share, market/trade state |
+| `/coin/<mint>/opengraph-image` | Per-coin share card (SVG) |
+| `/radar` | Autonomous trend radar: status, budget, source toggles, log |
+| `/tokenomics` | Revenue split, the fees→treasury→buyback→burn loop |
+
+### API
+
+| Endpoint | Methods |
+| --- | --- |
+| `/api/generate` | `POST` — forge a draft (name, symbol, lore, tags, image prompt) |
+| `/api/image` | `POST` — resolve a logo for a draft |
+| `/api/ipfs` | `POST` — pseudo-CID metadata pointer |
+| `/api/launch` | `POST` — record a launch |
+| `/api/coins` | `GET`, `POST` |
+| `/api/trends` | `GET` (cached), `POST` (fresh scan) |
+| `/api/radar` | `GET`, `POST` (settings / start / stop / tick / recover) |
+| `/api/logo/<mint>.webp` | `GET` — deterministic pixel logo |
+
+## Launch modes
+
+Every coin carries a `mode`. This build only ever produces **`simulated`**:
+
+- No wallet connection, keypair, signing path or on-chain transaction exists
+  anywhere in this codebase.
+- `/api/launch` hardcodes `mode: "simulated"`; a client cannot request `live`.
+- The radar reports `liveCapable: false` and `/api/radar` clamps `buySol` to `0`
+  regardless of what a caller sends.
+- Nothing in this project can move funds.
+
+The trend radar scans Google Trends, Bluesky, Mastodon and Reddit, scores what it
+finds, and forges coins from the winners — it does not trade.
+
+## Local development
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+npm install
+npm run dev      # http://localhost:3000
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+```bash
+npm run build      # production build
+npm run typecheck  # tsc --noEmit
+npm run lint       # eslint
+npm test           # vitest run
+```
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Persistence
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+State lives in a JSON file at `.data/db.json`, overridable with
+`VIRAL_FORGE_DATA_DIR`.
 
-## Learn More
+This is deliberate rather than SQLite: the app targets Vercel's serverless
+runtime, whose filesystem is read-only and ephemeral, so a native database
+binding would fail at build and at runtime. The store degrades safely — if the
+filesystem is not writable it serves entirely from memory and the app stays
+functional; records simply do not survive a cold start. For durable storage,
+swap `src/lib/store.ts` for a hosted database.
 
-To learn more about Next.js, take a look at the following resources:
+## Environment
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+No environment variables are required to run or build. `VIRAL_FORGE_DATA_DIR` is
+the only supported override.
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## Credits
 
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Interaction model and information architecture studied from
+[launcher.wtf](https://www.launcher.wtf/). All code, copy and visual assets in
+this repository are original.

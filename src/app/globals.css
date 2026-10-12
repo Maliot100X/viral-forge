@@ -1,26 +1,254 @@
 @import "tailwindcss";
 
+/*
+  Design tokens lifted from the reference site's rendered markup:
+  background #06070f, color-scheme dark, mono-accented technical aesthetic.
+*/
+
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --bg: #06070f;
+  --bg-soft: #0b0d18;
+  --bg-card: #0e1120;
+  --line: #1c2036;
+  --line-bright: #2a3050;
+  --fg: #e8eaf2;
+  --fg-dim: #9aa0b8;
+  --fg-faint: #5d6480;
+  --accent: #7cf9c0;
+  --accent-dim: #35d99a;
+  --live: #7cf9c0;
+  --sim: #ffb454;
+  --danger: #ff5d6c;
+  --violet: #a78bfa;
 }
 
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --color-bg: var(--bg);
+  --color-bg-soft: var(--bg-soft);
+  --color-bg-card: var(--bg-card);
+  --color-line: var(--line);
+  --color-line-bright: var(--line-bright);
+  --color-fg: var(--fg);
+  --color-fg-dim: var(--fg-dim);
+  --color-fg-faint: var(--fg-faint);
+  --color-accent: var(--accent);
+  --color-accent-dim: var(--accent-dim);
+  --color-live: var(--live);
+  --color-sim: var(--sim);
+  --color-danger: var(--danger);
+  --color-violet: var(--violet);
+  --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+* {
+  border-color: var(--line);
+}
+
+html {
+  color-scheme: dark;
+  background: var(--bg);
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+::selection {
+  background: var(--accent);
+  color: #04120c;
+}
+
+/* Starfield canvas layer sits behind all content */
+.starfield {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+}
+
+.app-layer {
+  position: relative;
+  z-index: 1;
+}
+
+/* --- component primitives --- */
+
+.mono {
+  font-family: var(--font-mono);
+  font-variant-ligatures: none;
+}
+
+.label {
+  font-family: var(--font-mono);
+  font-size: 0.625rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--fg-faint);
+}
+
+.card {
+  background: var(--bg-card);
+  border: 1px solid var(--line);
+  border-radius: 0.5rem;
+}
+
+.pill {
+  font-family: var(--font-mono);
+  font-size: 0.5625rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  padding: 0.15rem 0.4rem;
+  border-radius: 0.25rem;
+  border: 1px solid currentColor;
+}
+
+.pill-live { color: var(--live); }
+.pill-sim { color: var(--sim); }
+
+.btn {
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  padding: 0.5rem 0.9rem;
+  border-radius: 0.375rem;
+  border: 1px solid var(--line-bright);
+  background: var(--bg-soft);
+  color: var(--fg);
+  transition: border-color 120ms, background 120ms, color 120ms;
+  cursor: pointer;
+}
+
+.btn:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #04120c;
+  font-weight: 600;
+}
+
+.btn-primary:hover:not(:disabled) {
+  background: var(--accent-dim);
+  border-color: var(--accent-dim);
+  color: #04120c;
+}
+
+.input,
+.select,
+.textarea {
+  width: 100%;
+  background: var(--bg-soft);
+  border: 1px solid var(--line);
+  border-radius: 0.375rem;
+  padding: 0.55rem 0.7rem;
+  color: var(--fg);
+  font-family: var(--font-mono);
+  font-size: 0.8125rem;
+  outline: none;
+}
+
+.input:focus,
+.select:focus,
+.textarea:focus {
+  border-color: var(--accent);
+}
+
+.textarea {
+  resize: vertical;
+  min-height: 5.5rem;
+  line-height: 1.55;
+}
+
+.tab {
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  letter-spacing: 0.08em;
+  padding: 0.4rem 0.7rem;
+  border-radius: 0.25rem;
+  border: 1px solid transparent;
+  color: var(--fg-dim);
+  cursor: pointer;
+  background: transparent;
+}
+
+.tab:hover { color: var(--fg); }
+
+.tab-active {
+  color: var(--accent);
+  border-color: var(--line-bright);
+  background: var(--bg-soft);
+}
+
+/* --- ticker tape --- */
+
+.tape {
+  overflow: hidden;
+  white-space: nowrap;
+  mask-image: linear-gradient(90deg, transparent, #000 4%, #000 96%, transparent);
+}
+
+.tape-track {
+  display: inline-flex;
+  gap: 1.75rem;
+  animation: tape-scroll 90s linear infinite;
+  will-change: transform;
+}
+
+.tape:hover .tape-track {
+  animation-play-state: paused;
+}
+
+@keyframes tape-scroll {
+  from { transform: translateX(0); }
+  to { transform: translateX(-50%); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tape-track { animation: none; }
+}
+
+/* --- misc --- */
+
+.divider {
+  height: 1px;
+  background: var(--line);
+}
+
+.log-line {
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  color: var(--fg-dim);
+  padding: 0.3rem 0;
+  border-bottom: 1px dashed var(--line);
+  display: flex;
+  gap: 0.6rem;
+}
+
+.blink {
+  animation: blink 1.4s steps(2, start) infinite;
+}
+
+@keyframes blink {
+  to { visibility: hidden; }
+}
+
+.grid-bg {
+  background-image:
+    linear-gradient(var(--line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--line) 1px, transparent 1px);
+  background-size: 44px 44px;
+  opacity: 0.25;
 }
