@@ -61,8 +61,10 @@ export default function RootLayout({
                 <p className="max-w-3xl leading-relaxed">
                   Meme coins are extremely high risk. This tool automates token
                   creation; it does not give financial advice. Launch responsibly
-                  and only with funds you can afford to lose. Every coin recorded
-                  here is simulated and is not on-chain.
+                  and only with funds you can afford to lose. Coins without a
+                  transaction signature are recorded off-chain only; coins that
+                  show one were submitted to the network and can be verified on
+                  an explorer.
                 </p>
               </div>
             </footer>
