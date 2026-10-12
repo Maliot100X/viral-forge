@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { useToast } from "./Toasts";
+import { phaseDelay, useForgeProcess } from "@/lib/process";
 import type { Coin, ForgeSource, GenerateResult, LogoStyle } from "@/lib/types";
 
 const MODES: Array<[ForgeSource, string]> = [
@@ -82,6 +83,7 @@ const STEPS: Step[] = [
 
 export default function Forge() {
   const { push } = useToast();
+  const process = useForgeProcess();
   const [source, setSource] = useState<ForgeSource>("prompt");
   const [input, setInput] = useState("");
   const [style, setStyle] = useState<LogoStyle>("auto");
@@ -100,20 +102,42 @@ export default function Forge() {
       push("Give it something to work with first", "err");
       return;
     }
+    const subject = input.trim();
     setBusy(true);
     setCoin(null);
+    process.begin(source, style, subject);
+
+    // Drive the agent's checklist at real moments. The local forge is fast,
+    // so the gaps are paced to keep the narration legible — and skipped
+    // entirely when the user asks for reduced motion.
+    const delay = phaseDelay(
+      typeof window !== "undefined" &&
+        window.matchMedia("(prefers-reduced-motion: reduce)").matches,
+    );
+    const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
     try {
+      await wait(delay);
+      process.advance("naming", subject);
+      await wait(delay);
+      process.advance("lore", subject);
+
       const res = await fetch("/api/generate", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ source, input: input.trim(), style }),
+        body: JSON.stringify({ source, input: subject, style }),
       });
       if (!res.ok) throw new Error(`generate failed (${res.status})`);
       const data = (await res.json()) as GenerateResult;
+
+      process.advance("logo", subject);
+      await wait(delay);
       setGen(data);
       setDraft(data);
+      process.succeed();
       push(`Forged $${data.symbol}`, "ok");
     } catch (e) {
+      process.fail((e as Error).message);
       push((e as Error).message, "err");
     } finally {
       setBusy(false);
@@ -123,6 +147,7 @@ export default function Forge() {
   async function onLaunch() {
     if (!draft) return;
     setBusy(true);
+    process.advance("launching");
     try {
       const res = await fetch("/api/launch", {
         method: "POST",
@@ -132,8 +157,9 @@ export default function Forge() {
       if (!res.ok) throw new Error(`launch failed (${res.status})`);
       const data = (await res.json()) as { coin: Coin };
       setCoin(data.coin);
-      push(`$${data.coin.symbol} recorded ${data.coin.mint.slice(0, 4)}…`, "ok");
+      process.markLaunched(data.coin.symbol);
     } catch (e) {
+      process.fail((e as Error).message);
       push((e as Error).message, "err");
     } finally {
       setBusy(false);
@@ -158,6 +184,7 @@ export default function Forge() {
                 setGen(null);
                 setDraft(null);
                 setCoin(null);
+                process.reset();
               }}
             >
               {label}

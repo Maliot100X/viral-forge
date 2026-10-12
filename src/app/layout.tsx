@@ -3,7 +3,7 @@ import "./globals.css";
 import Starfield from "@/components/Starfield";
 import Nav from "@/components/Nav";
 import { Toasts } from "@/components/Toasts";
-import MascotCompanion from "@/components/MascotCompanion";
+import ProcessCompanion from "@/components/ProcessCompanion";
 
 export const metadata: Metadata = {
   title: "VIRAL.forge — Anything viral becomes a coin.",
@@ -43,7 +43,7 @@ export default function RootLayout({
           <Toasts>
             <Nav />
             <main className="flex-1">{children}</main>
-            <MascotCompanion />
+            <ProcessCompanion />
             <footer className="border-t border-line px-4 py-6">
               <div className="mx-auto flex max-w-6xl flex-col gap-3 text-xs text-fg-faint">
                 <div className="flex flex-wrap items-center gap-3">
