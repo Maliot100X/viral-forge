@@ -1,9 +1,10 @@
 import { NextResponse, connection } from "next/server";
 import { getRadarState, logRadar, setTrends, updateSettings } from "@/lib/store";
 import { scanAll } from "@/lib/trends";
-import { forgeFromTrend } from "@/lib/forge";
+import { forge } from "@/lib/forge";
 import { addCoin, listCoins } from "@/lib/store";
 import { generateCoinId, generateMint } from "@/lib/ids";
+import { activeCluster, walletAddress, explorerUrl } from "@/lib/solana";
 import type { Coin, RadarSettings } from "@/lib/types";
 
 export async function GET() {
@@ -43,8 +44,11 @@ export async function POST(req: Request) {
 
   if (action === "start") {
     await updateSettings({ enabled: true });
+    const wallet = walletAddress();
     await logRadar(
-      "Radar initialised (simulation mode · no wallet configured)",
+      wallet
+        ? `Radar initialised · ${activeCluster()} · wallet ${wallet.slice(0, 4)}…${wallet.slice(-4)}`
+        : "Radar initialised · no wallet configured, forgery stays off-chain",
     );
   }
 
@@ -75,7 +79,9 @@ export async function POST(req: Request) {
 
     const created: Coin[] = [];
     for (const trend of toForge) {
-      const gen = forgeFromTrend(trend);
+      // Real brain path, with the local generator as a fallback. `forge`
+      // reports which one actually ran so the coin never claims AI falsely.
+      const gen = await forge("trend", trend.title, "auto");
       const mint = generateMint();
       const coin: Coin = {
         id: generateCoinId(),
@@ -91,19 +97,26 @@ export async function POST(req: Request) {
         sourceRef: `${trend.source}: ${trend.title.toLowerCase().slice(0, 60)}`,
         mint,
         createdAt: new Date().toISOString(),
+        // Radar never signs. It brands and records; an actual on-chain launch
+        // still requires the explicit confirmation gate in /api/launch.
         mode: "simulated",
         launchedBy: "radar",
         pumpUrl: `https://pump.fun/coin/${mint}`,
+        cluster: activeCluster(),
+        explorerUrl: explorerUrl(mint, "address", activeCluster()),
+        provenance: gen.provenance,
       };
       await addCoin(coin);
       created.push(coin);
       seen.add(trend.id);
     }
 
+    const engines = [...new Set(created.map((c) => c.provenance))];
+    const engineNote = engines.length ? ` · ${engines.join("/")} brain` : "";
     const summary = created.length
       ? `Scan ${state.ticks + 1}: ${trends.length} trends · forged ${created
           .map((c) => `$${c.symbol}`)
-          .join(", ")} (simulated)`
+          .join(", ")}${engineNote}`
       : `Scan ${state.ticks + 1}: ${trends.length} trends · nothing above min heat ${state.settings.minScore}`;
 
     await logRadar(

@@ -3,6 +3,8 @@ import TickerTape from "@/components/TickerTape";
 import CoinCard from "@/components/CoinCard";
 import { connection } from "next/server";
 import { getRadarState, listCoins, getTrends } from "@/lib/store";
+import { activeCluster, mainnetEnabled, walletBalanceSol } from "@/lib/solana";
+import { brainStatus } from "@/lib/forge";
 
 // These pages read the store on every request; a blocking route is the honest
 // shape for them under `cacheComponents`. See nextjs.org/docs/messages/blocking-prerender-dynamic
@@ -19,8 +21,13 @@ export default async function Home() {
     getTrends(),
   ]);
 
-  const sim = coins.filter((c) => c.mode === "simulated").length;
-  const live = coins.length - sim;
+  // Read the real engine and cluster. The network stat used to hardcode
+  // "mainnet" while the app ran on devnet.
+  const cluster = activeCluster();
+  const brain = brainStatus();
+  const balance = await walletBalanceSol();
+
+  const onChain = coins.filter((c) => Boolean(c.txSignature)).length;
 
   return (
     <>
@@ -44,6 +51,16 @@ export default async function Home() {
           <span>no wallet needed to forge · wallet only to launch</span>
         </div>
 
+        <div className="mono mt-2 flex flex-wrap items-center gap-3 text-[10px]">
+          <span className={brain.live ? "text-accent" : "text-sim"}>
+            ● {brain.label.toLowerCase()}
+          </span>
+          <span className="text-fg-faint">cluster {cluster}</span>
+          {balance !== null && (
+            <span className="text-fg-faint">wallet {balance.toFixed(3)} SOL</span>
+          )}
+        </div>
+
         <div className="mt-3 flex flex-wrap gap-3 text-[11px] text-fg-dim">
           <span className="pill" style={{ borderColor: "var(--line-bright)" }}>
             AI name + ticker + lore
@@ -52,17 +69,29 @@ export default async function Home() {
             AI logo · meme / 3D / realistic
           </span>
           <span className="pill" style={{ borderColor: "var(--line-bright)" }}>
-            trend radar · auto-launch
+            trend radar · auto-forge
           </span>
         </div>
       </section>
 
       <section className="mx-auto mt-8 grid w-full max-w-6xl grid-cols-2 gap-3 px-4 lg:grid-cols-4">
         {[
-          { k: "coins forged", v: String(coins.length), s: `${live} live · ${sim} simulated` },
+          {
+            k: "coins forged",
+            v: String(coins.length),
+            s: `${onChain} on-chain · ${coins.length - onChain} recorded`,
+          },
           { k: "trends tracked", v: String(trends.length), s: "4 sources configured" },
-          { k: "radar", v: radar.running ? "ON" : "OFF", s: `${radar.ticks} scans · simulation` },
-          { k: "network", v: "SOL", s: "pump.fun · mainnet" },
+          {
+            k: "radar",
+            v: radar.running ? "ON" : "OFF",
+            s: `${radar.ticks} scans · ${radar.liveCapable ? "live wallet" : "record only"}`,
+          },
+          {
+            k: "network",
+            v: "SOL",
+            s: `${cluster} · ${mainnetEnabled() ? "mainnet enabled" : "mainnet locked"}`,
+          },
         ].map((stat) => (
           <div key={stat.k} className="card p-3">
             <p className="label">{stat.k}</p>

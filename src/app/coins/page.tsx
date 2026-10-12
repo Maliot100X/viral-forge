@@ -12,8 +12,8 @@ export const metadata = {
 
 const FILTERS = [
   ["all", "all"],
-  ["live", "live"],
-  ["simulated", "simulated"],
+  ["live", "on-chain"],
+  ["simulated", "off-chain"],
   ["radar", "radar"],
   ["manual", "manual"],
 ] as const;

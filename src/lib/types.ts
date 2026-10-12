@@ -3,6 +3,19 @@
 
 export type LaunchMode = "live" | "simulated";
 
+/**
+ * Which engine actually produced a coin's branding. Surfaced in the UI so a
+ * template-generated coin is never presented as AI-generated.
+ */
+export type Provenance = "river" | "local";
+
+/**
+ * Where a coin's artwork came from.
+ *   - `pollinations` — a real generated image (flux.1-schnell).
+ *   - `procedural`  — the deterministic 16x16 pixel sprite fallback.
+ */
+export type ImageProvenance = "pollinations" | "procedural";
+
 export type ForgeSource =
   | "prompt"
   | "x"
@@ -37,7 +50,18 @@ export interface Coin {
   launchedBy: "user" | "radar";
   pumpUrl: string;
   txSignature?: string;
+  /** Real Solana devnet/mainnet explorer link for `txSignature`. */
+  explorerUrl?: string;
+  /** Cluster the transaction was sent to. */
+  cluster?: SolanaCluster;
+  /** Which engine branded the coin. */
+  provenance?: Provenance;
+  /** Where the artwork came from. */
+  imageProvenance?: ImageProvenance;
 }
+
+/** Solana clusters this app can target. */
+export type SolanaCluster = "devnet" | "mainnet-beta";
 
 export interface Trend {
   id: string;
@@ -103,6 +127,8 @@ export interface GenerateResult {
   vibe: string;
   imagePrompt: string;
   imageStyle: Exclude<LogoStyle, "auto">;
+  /** Which engine produced this result. */
+  provenance: Provenance;
 }
 
 export interface LaunchRequest {

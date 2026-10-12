@@ -1,9 +1,11 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useToast } from "./Toasts";
 import { phaseDelay, useForgeProcess } from "@/lib/process";
+import { seedFromPrompt } from "@/lib/images";
 import type { Coin, ForgeSource, GenerateResult, LogoStyle } from "@/lib/types";
+import type { LaunchSummary } from "@/lib/solana";
 
 const MODES: Array<[ForgeSource, string]> = [
   ["prompt", "✦ Prompt"],
@@ -92,10 +94,31 @@ export default function Forge() {
   const [gen, setGen] = useState<GenerateResult | null>(null);
   const [coin, setCoin] = useState<Coin | null>(null);
 
+  // The transaction summary returned by /api/launch when it refuses to send
+  // without confirmation. Nothing is signed until the user approves this.
+  const [pending, setPending] = useState<LaunchSummary | null>(null);
+  const [buySol, setBuySol] = useState(0);
+
   // editable draft, populated after generation
   const [draft, setDraft] = useState<GenerateResult | null>(null);
 
   const meta = HINTS[source];
+
+  /**
+   * Preview art URL. There is no mint before launch, so the route is asked to
+   * render from the prompt directly, with the same seed the final render will
+   * use. That keeps preview and launched artwork identical instead of swapping
+   * a placeholder for real art at the last moment.
+   */
+  const previewUrl = useMemo(() => {
+    if (!draft) return null;
+    const q = new URLSearchParams({
+      style: draft.imageStyle,
+      prompt: draft.imagePrompt,
+    });
+    if (!coin) q.set("seed", String(seedFromPrompt(draft.imagePrompt)));
+    return `/api/logo/${coin?.mint ?? "preview"}.webp?${q.toString()}`;
+  }, [draft, coin]);
 
   async function onGenerate() {
     if (!input.trim()) {
@@ -105,6 +128,7 @@ export default function Forge() {
     const subject = input.trim();
     setBusy(true);
     setCoin(null);
+    setPending(null);
     process.begin(source, style, subject);
 
     // Drive the agent's checklist at real moments. The local forge is fast,
@@ -144,7 +168,49 @@ export default function Forge() {
     }
   }
 
-  async function onLaunch() {
+  /**
+   * Ask the server what a real launch would do. The server simulates and
+   * returns the summary with HTTP 428 instead of sending, so nothing is signed
+   * on this call. We show that summary and wait for an explicit click.
+   */
+  async function onRequestLaunch() {
+    if (!draft) return;
+    setBusy(true);
+    setCoin(null);
+    try {
+      const res = await fetch("/api/launch", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          ...draft,
+          source,
+          sourceRef: input.trim(),
+          mode: "devnet",
+          buySol,
+          confirm: false,
+        }),
+      });
+      const data = (await res.json()) as {
+        error?: string;
+        detail?: string;
+        summary?: LaunchSummary;
+      };
+      if (res.status === 428 && data.summary) {
+        setPending(data.summary);
+        push("Review the transaction before signing", "ok");
+        return;
+      }
+      if (!res.ok) throw new Error(data.detail ?? data.error ?? `launch failed (${res.status})`);
+    } catch (e) {
+      process.fail((e as Error).message);
+      push((e as Error).message, "err");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /** Actually sign and submit. Only reachable after the summary was approved. */
+  async function onConfirmLaunch() {
     if (!draft) return;
     setBusy(true);
     process.advance("launching");
@@ -152,12 +218,23 @@ export default function Forge() {
       const res = await fetch("/api/launch", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ ...draft, source, sourceRef: input.trim() }),
+        body: JSON.stringify({
+          ...draft,
+          source,
+          sourceRef: input.trim(),
+          mode: "devnet",
+          buySol,
+          confirm: true,
+        }),
       });
-      if (!res.ok) throw new Error(`launch failed (${res.status})`);
-      const data = (await res.json()) as { coin: Coin };
+      const data = (await res.json()) as { coin?: Coin; detail?: string; error?: string };
+      if (!res.ok || !data.coin) {
+        throw new Error(data.detail ?? data.error ?? `launch failed (${res.status})`);
+      }
       setCoin(data.coin);
+      setPending(null);
       process.markLaunched(data.coin.symbol);
+      push(`$${data.coin.symbol} launched on devnet`, "ok");
     } catch (e) {
       process.fail((e as Error).message);
       push((e as Error).message, "err");
@@ -184,6 +261,7 @@ export default function Forge() {
                 setGen(null);
                 setDraft(null);
                 setCoin(null);
+                setPending(null);
                 process.reset();
               }}
             >
@@ -255,12 +333,20 @@ export default function Forge() {
               <div>
                 {/* eslint-disable-next-line @next/next/no-img-element */}
                 <img
-                  src={`/api/logo/${coin?.mint ?? "preview0000000000000000000000000000000000"}.webp?style=${draft.imageStyle}`}
-                  alt={`${draft.name} logo`}
+                  key={previewUrl ?? "none"}
+                  src={previewUrl ?? ""}
+                  alt={`${draft.name} logo preview`}
                   width={220}
                   height={220}
                   className="w-full rounded-md border border-line"
                 />
+                <p className="mono mt-1 text-[9px] text-fg-faint">
+                  {coin
+                    ? coin.imageProvenance === "pollinations"
+                      ? "AI artwork · flux.1-schnell"
+                      : "procedural artwork"
+                    : "live preview · final art rendered on launch"}
+                </p>
                 <div className="mt-2 flex flex-wrap gap-1">
                   {STYLES.filter((s) => s !== "auto").map((s) => (
                     <button
@@ -341,14 +427,24 @@ export default function Forge() {
                   />
                 </div>
 
+                {gen.provenance === "river" ? (
+                  <p className="mono text-[10px] text-accent">
+                    branded by river ai · {gen.name.length > 0 ? "live model" : ""}
+                  </p>
+                ) : (
+                  <p className="mono text-[10px] text-sim">
+                    branded locally · template brain (no model key)
+                  </p>
+                )}
+
                 <div className="flex flex-wrap items-center gap-2">
                   <button
                     type="button"
                     className="btn btn-primary"
                     disabled={busy}
-                    onClick={onLaunch}
+                    onClick={onRequestLaunch}
                   >
-                    {busy ? "recording…" : "launch"}
+                    {busy ? "preparing…" : "launch"}
                   </button>
                   <button
                     type="button"
@@ -365,15 +461,111 @@ export default function Forge() {
                   )}
                 </div>
 
+                {pending && !coin && (
+                  <div className="card mono p-3 text-[11px] text-fg-dim">
+                    <p className="label mb-2">confirm transaction</p>
+                    <div className="flex flex-col gap-1">
+                      <div className="flex justify-between gap-3">
+                        <span className="text-fg-faint">cluster</span>
+                        <span className="text-accent">{pending.cluster}</span>
+                      </div>
+                      <div className="flex justify-between gap-3">
+                        <span className="text-fg-faint">from</span>
+                        <span className="truncate">
+                          {pending.from.slice(0, 8)}…{pending.from.slice(-6)}
+                        </span>
+                      </div>
+                      <div className="flex justify-between gap-3">
+                        <span className="text-fg-faint">amount</span>
+                        <span>
+                          {pending.sol > 0
+                            ? `${pending.sol.toFixed(4)} SOL`
+                            : "0 SOL · record only"}
+                        </span>
+                      </div>
+                      <div className="flex justify-between gap-3">
+                        <span className="text-fg-faint">balance</span>
+                        <span>
+                          {pending.balanceSol === null
+                            ? "unknown"
+                            : `${pending.balanceSol.toFixed(4)} SOL`}
+                        </span>
+                      </div>
+                    </div>
+
+                    {pending.belowRentExempt && (
+                      <p className="mt-2 text-danger">
+                        Below the rent-exempt floor — the amount was raised to{" "}
+                        {(pending.rentExemptMinimum / 1e9).toFixed(6)} SOL, or send 0
+                        to record without moving value.
+                      </p>
+                    )}
+
+                    <div className="mt-2 flex items-center gap-2">
+                      <span className="text-fg-faint">dev buy</span>
+                      <input
+                        type="number"
+                        min={0}
+                        max={100}
+                        step={0.001}
+                        value={buySol}
+                        onChange={(e) => setBuySol(Number(e.target.value) || 0)}
+                        className="input w-24"
+                      />
+                      <span className="text-fg-faint">SOL</span>
+                    </div>
+
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        className="btn btn-primary"
+                        disabled={busy}
+                        onClick={onConfirmLaunch}
+                      >
+                        {busy ? "signing…" : "sign & submit"}
+                      </button>
+                      <button
+                        type="button"
+                        className="btn"
+                        disabled={busy}
+                        onClick={() => setPending(null)}
+                      >
+                        cancel
+                      </button>
+                    </div>
+                    <p className="mt-2 text-[10px] text-fg-faint">
+                      Nothing is signed until you press sign &amp; submit.
+                    </p>
+                  </div>
+                )}
+
                 {coin && (
                   <div className="card mono p-3 text-[11px] text-fg-dim">
                     <div>
                       mint <span className="text-accent">{coin.mint}</span>
                     </div>
                     <div>
-                      mode <span className="text-sim">{coin.mode}</span> · recorded
-                      locally, nothing broadcast
+                      mode <span className="text-accent">{coin.mode}</span>
+                      {coin.cluster ? ` · ${coin.cluster}` : ""}
                     </div>
+                    {coin.txSignature ? (
+                      <div className="mt-1 break-all">
+                        tx{" "}
+                        <a
+                          href={coin.explorerUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="text-accent underline"
+                        >
+                          {coin.txSignature.slice(0, 20)}…
+                        </a>{" "}
+                        <span className="text-fg-faint">verify on explorer</span>
+                      </div>
+                    ) : (
+                      <div className="mt-1 text-fg-faint">
+                        recorded locally — nothing was broadcast
+                      </div>
+                    )}
                   </div>
                 )}
               </div>

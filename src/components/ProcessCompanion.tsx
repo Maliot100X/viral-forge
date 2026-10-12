@@ -76,8 +76,36 @@ export default function ProcessCompanion() {
   const [now, setNow] = useState(0);
   const [reduced, setReduced] = useState(false);
   const [showTrends, setShowTrends] = useState(false);
+  // The engine actually in use, read from the API rather than asserted in copy.
+  const [brain, setBrain] = useState<{ live: boolean; label: string } | null>(null);
+  const [cluster, setCluster] = useState<string | null>(null);
   const { push } = useToast();
   const lastPhase = useRef(phase);
+
+  // Ask the server which brain and cluster are really in use. The footer used
+  // to hardcode "every coin here is simulated", which became a lie the moment
+  // a real transaction landed.
+  useEffect(() => {
+    // This effect has no cleanup, so nothing ever flips this flag. It stays a
+    // plain guard for the case where the component unmounts mid-fetch.
+    const cancelled = false;
+    async function loadStatus() {
+      try {
+        const res = await fetch("/api/status");
+        if (!res.ok) return;
+        const data = (await res.json()) as {
+          brain?: { live: boolean; label: string };
+          cluster?: string;
+        };
+        if (cancelled) return;
+        setBrain(data.brain ?? null);
+        if (data.cluster) setCluster(data.cluster);
+      } catch {
+        /* non-essential */
+      }
+    }
+    loadStatus();
+  }, []);
 
   // Respect the OS motion preference.
   useEffect(() => {
@@ -268,7 +296,9 @@ export default function ProcessCompanion() {
         </div>
       </div>
       <p className="mono mt-1 px-1 text-[9px] text-fg-faint">
-        generated narration · every coin here is simulated
+        {brain
+          ? `${brain.label.toLowerCase()} · ${cluster ?? "devnet"}`
+          : "checking engine…"}
       </p>
     </aside>
   );

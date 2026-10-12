@@ -4,18 +4,19 @@ import type {
   LogoStyle,
   Trend,
 } from "./types";
+import { brainAvailable, brainModel, chatJSON } from "./brain";
 
 // ---------------------------------------------------------------------------
 // Forge engine.
 //
-// Two backends, selected by env at call time:
-//   1. Model provider (ANTHROPIC_API_KEY or OPENAI_API_KEY) — used when present.
-//   2. Deterministic local generator — always available, no key required.
+// Two backends:
+//   1. River AI (RIVER_API_KEY) — the real brain. Used when the key is present.
+//   2. Deterministic local generator — the fallback, always available.
 //
-// The local generator is what makes the app runnable with zero configuration,
-// which is what lets /api/generate, the radar, and the forge UI all work in a
-// fresh clone. It is a real generator, not a stub returning fixed strings: it
-// derives ticker, lore, tags, vibe and image prompt from the input text.
+// `forge()` returns which path ran in `result.provenance`, so the UI can state
+// honestly whether AI produced the coin or the templates did. Without that, a
+// key-less deploy looks identical to an AI one, which is precisely the
+// confusion this build exists to remove.
 // ---------------------------------------------------------------------------
 
 const STOPWORDS = new Set([
@@ -147,7 +148,7 @@ export function forgeLocally(
     `${input.trim()}. Rendered as ${STYLE_HINTS[imageStyle]}. ` +
     `Single centered subject, strong silhouette, ${vibe} mood, square composition.`;
 
-  return { name, symbol, description, tags, vibe, imagePrompt, imageStyle };
+  return { name, symbol, description, tags, vibe, imagePrompt, imageStyle, provenance: "local" };
 }
 
 /**
@@ -167,68 +168,131 @@ export function forgeFromTrend(trend: Trend): GenerateResult {
   };
 }
 
+/** The subset of style names the image generator accepts for a forge. */
+const FORGE_STYLES: Exclude<LogoStyle, "auto">[] = [
+  "meme",
+  "cartoon",
+  "3d",
+  "realistic",
+  "anime",
+];
+
+/** Shapes a forge result before it is trusted. Anything malformed is rejected. */
+function coerceForgeResult(
+  raw: unknown,
+  source: ForgeSource,
+  input: string,
+  style: LogoStyle,
+): GenerateResult | null {
+  if (typeof raw !== "object" || raw === null) return null;
+  const v = raw as Record<string, unknown>;
+
+  const name = typeof v.name === "string" ? v.name.trim() : "";
+  if (name.length < 2) return null;
+
+  const symbolRaw =
+    typeof v.symbol === "string" ? v.symbol.toUpperCase().replace(/[^A-Z0-9]/g, "") : "";
+  if (symbolRaw.length < 2) return null;
+
+  const description = typeof v.description === "string" ? v.description.trim() : "";
+  if (description.length < 20) return null;
+
+  const vibe = typeof v.vibe === "string" && v.vibe.trim() ? v.vibe.trim() : "unclassified";
+
+  const tags = Array.isArray(v.tags)
+    ? v.tags
+        .filter((t): t is string => typeof t === "string")
+        .map((t) => t.toLowerCase().trim().replace(/[^a-z0-9-]/g, ""))
+        .filter(Boolean)
+        .slice(0, 8)
+    : [];
+
+  const seed = hash(`${source}:${input}:${style}`);
+  const declared =
+    typeof v.imageStyle === "string" &&
+    (FORGE_STYLES as string[]).includes(v.imageStyle)
+      ? (v.imageStyle as Exclude<LogoStyle, "auto">)
+      : null;
+  const imageStyle = declared ?? resolveStyle(style, input, seed);
+
+  const imagePrompt =
+    typeof v.imagePrompt === "string" && v.imagePrompt.trim().length > 10
+      ? v.imagePrompt.trim()
+      : `${name}. ${description}`.slice(0, 400);
+
+  return {
+    name: name.slice(0, 60),
+    symbol: symbolRaw.slice(0, 8),
+    description: description.slice(0, 600),
+    tags,
+    vibe: vibe.slice(0, 60),
+    imagePrompt: imagePrompt.slice(0, 800),
+    imageStyle,
+    provenance: "river",
+  };
+}
+
 /**
- * Optional model-provider path. Returns null when no key is configured or the
- * provider call fails, so callers fall back to the local generator rather than
- * erroring. Never throws.
+ * Real brain path: ask River for the full coin branding and validate it.
+ * Returns null when no key is configured or the model keeps emitting junk, so
+ * callers fall back to the local generator rather than erroring. Never throws.
  */
 export async function forgeWithProvider(
   source: ForgeSource,
   input: string,
   style: LogoStyle,
 ): Promise<GenerateResult | null> {
-  const key = process.env.ANTHROPIC_API_KEY;
-  if (!key) return null;
+  if (!brainAvailable()) return null;
 
   const prompt =
-    `You are a meme-coin branding engine. Given a source (${source}) and input, ` +
-    `return STRICT JSON only, no prose, with keys: name (2-4 words), symbol ` +
-    `(3-6 uppercase chars), description (2-3 sentences of lore), tags (5 lowercase ` +
-    `strings), vibe (2-4 words), imagePrompt (one detailed visual prompt), ` +
-    `imageStyle (one of meme|cartoon|3d|realistic|anime).\n\n` +
-    `Input: ${input}\nRequested style: ${style}`;
+    `You are the branding engine for a Solana memecoin launchpad. The launchpad ` +
+    `turns viral internet moments into tradeable coins.\n\n` +
+    `Source type: ${source}\n` +
+    `Source material: ${input}\n` +
+    `Requested art style: ${style === "auto" ? "choose the best fit" : style}\n\n` +
+    `Write branding that feels native to crypto-Twitter: specific and funny, ` +
+    `never generic filler, never corporate. Avoid trademarked names and real ` +
+    `people.\n\n` +
+    `Reply with STRICT JSON only — no prose, no markdown fence:\n` +
+    `{\n` +
+    `  "name": "2-4 word coin name",\n` +
+    `  "symbol": "3-6 uppercase letters/digits",\n` +
+    `  "description": "2-3 sentences of lore, the coin's origin story",\n` +
+    `  "tags": ["5 lowercase single-word tags"],\n` +
+    `  "vibe": "2-4 words",\n` +
+    `  "imagePrompt": "one vivid visual prompt for the coin logo",\n` +
+    `  "imageStyle": "one of meme|cartoon|3d|realistic|anime"\n` +
+    `}`;
 
-  try {
-    const res = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-api-key": key,
-        "anthropic-version": "2023-06-01",
+  return chatJSON(
+    [
+      {
+        role: "system",
+        content: "You reply with raw JSON objects and nothing else. No markdown fences.",
       },
-      body: JSON.stringify({
-        model: "claude-sonnet-4-5",
-        max_tokens: 700,
-        messages: [{ role: "user", content: prompt }],
-      }),
-      signal: AbortSignal.timeout(30_000),
-    });
-    if (!res.ok) return null;
-    const data = (await res.json()) as {
-      content?: Array<{ type: string; text?: string }>;
-    };
-    const text = data.content?.map((c) => c.text ?? "").join("") ?? "";
-    const json = text.slice(text.indexOf("{"), text.lastIndexOf("}") + 1);
-    const parsed = JSON.parse(json) as Partial<GenerateResult>;
-    if (!parsed.name || !parsed.symbol) return null;
-    return {
-      name: String(parsed.name).slice(0, 60),
-      symbol: String(parsed.symbol).toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 8),
-      description: String(parsed.description ?? "").slice(0, 600) || input,
-      tags: Array.isArray(parsed.tags) ? parsed.tags.slice(0, 8).map(String) : [],
-      vibe: String(parsed.vibe ?? "").slice(0, 60) || "unclassified",
-      imagePrompt: String(parsed.imagePrompt ?? input).slice(0, 800),
-      imageStyle: (parsed.imageStyle as Exclude<LogoStyle, "auto">) ?? "meme",
-    };
-  } catch {
-    return null;
-  }
+      { role: "user", content: prompt },
+    ],
+    (raw) => coerceForgeResult(raw, source, input, style),
+    { maxTokens: 800, temperature: 0.95, timeoutMs: 25_000, retries: 2 },
+  );
 }
 
+/**
+ * Forge a coin, preferring the real brain and falling back to templates.
+ * The returned `provenance` field reports which one actually ran.
+ */
 export async function forge(
   source: ForgeSource,
   input: string,
   style: LogoStyle,
 ): Promise<GenerateResult> {
   return (await forgeWithProvider(source, input, style)) ?? forgeLocally(source, input, style);
+}
+
+/** Describes the active brain for the UI's status chip. */
+export function brainStatus(): { live: boolean; label: string; model?: string } {
+  if (!brainAvailable()) {
+    return { live: false, label: "TEMPLATE BRAIN" };
+  }
+  return { live: true, label: "RIVER BRAIN", model: brainModel() };
 }

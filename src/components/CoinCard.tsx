@@ -22,7 +22,6 @@ export default function CoinCard({ coin, compact = false }: { coin: Coin; compac
         width={compact ? 44 : 72}
         height={compact ? 44 : 72}
         className="shrink-0 rounded border border-line"
-        style={{ imageRendering: "pixelated" }}
       />
 
       <div className="min-w-0 flex-1">
@@ -31,12 +30,18 @@ export default function CoinCard({ coin, compact = false }: { coin: Coin; compac
             {coin.name}
           </a>
           <span className={`pill ${live ? "pill-live" : "pill-sim"}`}>
-            {live ? "LIVE" : "SIM"}
+            {live ? "LIVE" : "OFF-CHAIN"}
           </span>
+          {coin.provenance === "river" && (
+            <span className="pill" title="Branded by the River AI model">
+              AI
+            </span>
+          )}
         </div>
 
         <p className="mono mt-0.5 text-[11px] text-fg-faint">
           ${coin.symbol} · {coin.source} · {coin.launchedBy} · {age(coin.createdAt)}
+          {coin.cluster ? ` · ${coin.cluster}` : ""}
         </p>
 
         {!compact && coin.description && (
@@ -63,7 +68,7 @@ export default function CoinCard({ coin, compact = false }: { coin: Coin; compac
           </a>
           {coin.txSignature && (
             <a
-              href={`https://solscan.io/tx/${coin.txSignature}`}
+              href={coin.explorerUrl ?? `https://solscan.io/tx/${coin.txSignature}`}
               target="_blank"
               rel="noreferrer"
               className="hover:text-accent"
