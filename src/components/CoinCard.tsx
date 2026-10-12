@@ -1,3 +1,4 @@
+import Link from "next/link";
 import type { Coin } from "@/lib/types";
 import { shortMint } from "@/lib/ids";
 
@@ -13,6 +14,9 @@ function age(iso: string): string {
 
 export default function CoinCard({ coin, compact = false }: { coin: Coin; compact?: boolean }) {
   const live = coin.mode === "live";
+  // A row whose mint is null never launched anything, so there is no coin page
+  // to open. Linking anyway produced a dead /coin/null link that 404'd.
+  const hasMint = Boolean(coin.mint);
   return (
     <article className="card flex gap-3 p-3">
       {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -26,9 +30,13 @@ export default function CoinCard({ coin, compact = false }: { coin: Coin; compac
 
       <div className="min-w-0 flex-1">
         <div className="flex items-start gap-2">
-          <a href={`/coin/${coin.mint}`} className="mono text-sm hover:text-accent">
-            {coin.name}
-          </a>
+          {hasMint ? (
+            <Link href={`/coin/${coin.mint}`} className="mono text-sm hover:text-accent">
+              {coin.name}
+            </Link>
+          ) : (
+            <span className="mono text-sm text-fg-dim">{coin.name}</span>
+          )}
           <span className={`pill ${live ? "pill-live" : "pill-sim"}`}>
             {live ? "LIVE" : "OFF-CHAIN"}
           </span>
@@ -55,17 +63,25 @@ export default function CoinCard({ coin, compact = false }: { coin: Coin; compac
         )}
 
         <div className="mono mt-2 flex flex-wrap items-center gap-3 text-[10px]">
-          <a href={`/coin/${coin.mint}`} className="hover:text-accent">
-            open →
-          </a>
-          <a
-            href={coin.pumpUrl}
-            target="_blank"
-            rel="noreferrer"
-            className="hover:text-accent"
-          >
-            pump.fun ↗
-          </a>
+          {hasMint ? (
+            <Link href={`/coin/${coin.mint}`} className="hover:text-accent">
+              open →
+            </Link>
+          ) : (
+            <span className="text-fg-faint" title="This coin was never launched on-chain">
+              no mint yet
+            </span>
+          )}
+          {hasMint && (
+            <a
+              href={coin.pumpUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="hover:text-accent"
+            >
+              pump.fun ↗
+            </a>
+          )}
           {coin.txSignature && (
             <a
               href={coin.explorerUrl ?? `https://solscan.io/tx/${coin.txSignature}`}
@@ -76,7 +92,7 @@ export default function CoinCard({ coin, compact = false }: { coin: Coin; compac
               tx ↗
             </a>
           )}
-          <span className="text-fg-faint">{shortMint(coin.mint)}</span>
+          {hasMint && <span className="text-fg-faint">{shortMint(coin.mint)}</span>}
         </div>
       </div>
     </article>

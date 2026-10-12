@@ -52,9 +52,9 @@ export default async function CoinPage({
           forge
         </Link>
         {" / "}
-        <a href="/coins" className="hover:text-accent">
+        <Link href="/coins" className="hover:text-accent">
           launched
-        </a>
+        </Link>
         {" / "}
         <span className="text-fg-dim">${coin.symbol}</span>
       </p>

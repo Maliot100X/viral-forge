@@ -1,21 +1,23 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 
-// The store reads VIRAL_FORGE_DATA_DIR at module load, so point it at a fresh
-// temp dir before importing, and reset the module registry per test.
-let dir: string;
+// The store now persists to Postgres, which these unit tests deliberately do
+// not touch: DATABASE_URL is cleared so every test exercises the in-memory
+// fallback. Postgres behaviour is covered by the round-trip script run against
+// the real database, not by this file.
+//
+// Two radar paths need a database — `seen` is a table and the log is capped by
+// a SQL DELETE — so those are asserted against a stub rather than skipped.
 
-beforeEach(async () => {
-  dir = await mkdtemp(join(tmpdir(), "vf-store-"));
-  process.env.VIRAL_FORGE_DATA_DIR = dir;
+const SAVED_DB_URL = process.env.DATABASE_URL;
+
+beforeEach(() => {
+  delete process.env.DATABASE_URL;
   vi.resetModules();
 });
 
-afterEach(async () => {
-  await rm(dir, { recursive: true, force: true });
-  delete process.env.VIRAL_FORGE_DATA_DIR;
+afterEach(() => {
+  if (SAVED_DB_URL === undefined) delete process.env.DATABASE_URL;
+  else process.env.DATABASE_URL = SAVED_DB_URL;
 });
 
 async function freshStore() {
@@ -86,19 +88,9 @@ describe("store", () => {
     expect(coins[0].id).toBe("new");
   });
 
-  it("marks only genuinely new trends as isNew", async () => {
+  it("reports memory persistence when no database is configured", async () => {
     const s = await freshStore();
-    const t = {
-      id: "t1", source: "google" as const, title: "x", score: 1,
-      startedAt: "2025-01-01T00:00:00.000Z", url: "u", context: "c",
-      firstSeenAt: "2025-01-01T00:00:00.000Z", isNew: false,
-    };
-    await s.setTrends([t]);
-    expect((await s.getTrends())[0].isNew).toBe(true);
-    // Second sighting: the id is now in `seen`... but seen is only fed by the
-    // radar, so a re-set still reports not-new only once seen is populated.
-    const state = await s.getRadarState();
-    expect(state.recentTitles).toContain("x");
+    expect(s.persistence()).toBe("memory");
   });
 
   it("reports liveCapable false and buySol 0 — the spend floor", async () => {
@@ -125,28 +117,123 @@ describe("store", () => {
     expect(next.sources.bluesky).toBe(true);
   });
 
-  it("caps the radar log at 200 entries", async () => {
+});
+
+describe("store against a stubbed postgres", () => {
+  const rows: { at: string; message: string }[] = [];
+  const state = new Map<string, unknown>();
+  let trendRows: Record<string, unknown>[] = [];
+  let seenIds = new Set<string>();
+  const queries: { text: string; params: unknown[] }[] = [];
+
+  /**
+   * The stub the store sees. Built through a plain executor so the test file can
+   * drive the same fake tables directly when it needs to seed a state that the
+   * store's own writes would otherwise create.
+   */
+  const execute = async (text: string, params: unknown[] = []) => {
+    const t = text.replace(/\s+/g, " ").trim();
+    queries.push({ text: t, params });
+    if (t.startsWith("INSERT INTO radar_log")) {
+      rows.unshift({ at: params[0] as string, message: params[1] as string });
+    }
+    if (t.startsWith("DELETE FROM radar_log")) {
+      rows.splice(200);
+    }
+    if (t.startsWith("SELECT at, message FROM radar_log")) {
+      return rows.slice(0, 200);
+    }
+    if (t.startsWith("SELECT trend_id FROM radar_seen")) {
+      return [...seenIds].map((id) => ({ trend_id: id }));
+    }
+    if (t.startsWith("INSERT INTO radar_seen")) {
+      seenIds.add(params[0] as string);
+      return [];
+    }
+    if (t.startsWith("DELETE FROM trends")) {
+      trendRows = [];
+      return [];
+    }
+    if (t.startsWith("INSERT INTO trends")) {
+      trendRows.push({
+        id: params[0], source: params[1], title: params[2], score: params[3],
+        started_at: params[4], url: params[5], context: params[6],
+        first_seen_at: params[7],
+      });
+      return [];
+    }
+    if (t.startsWith("SELECT * FROM trends")) return trendRows;
+    return [];
+  };
+  const stubDb = { query: execute };
+
+  beforeEach(() => {
+    rows.length = 0;
+    state.clear();
+    trendRows = [];
+    seenIds = new Set();
+    queries.length = 0;
+    process.env.DATABASE_URL = "postgresql://stub/db";
+    vi.resetModules();
+    vi.doMock("./db", () => ({
+      durable: () => true,
+      readState: async (k: string) => state.get(k) ?? null,
+      writeState: async (k: string, v: unknown) => void state.set(k, v),
+      query: execute,
+    }));
+  });
+
+  afterEach(() => {
+    vi.doUnmock("./db");
+  });
+
+  it("caps the radar log at 200 entries with a SQL trim", async () => {
     const s = await freshStore();
     for (let i = 0; i < 260; i++) await s.logRadar(`entry ${i}`);
     expect((await s.getRadarState()).log.length).toBe(200);
+    expect(queries.some((q) => q.text.startsWith("DELETE FROM radar_log"))).toBe(true);
   });
 
-  it("records ticks and seen via the log extras", async () => {
+  it("records ticks via the log extras", async () => {
     const s = await freshStore();
-    await s.logRadar("tick", { ticks: 7, seen: ["a", "b"] });
-    const state = await s.getRadarState();
-    expect(state.ticks).toBe(7);
-    expect(state.seen).toEqual(["a", "b"]);
+    await s.logRadar("tick", { ticks: 7 });
+    expect((await s.getRadarState()).ticks).toBe(7);
   });
 
-  it("survives a corrupt db file by falling back to empty", async () => {
+  it("seeds radar_seen on first sight and reports new only until then", async () => {
     const s = await freshStore();
-    await s.addCoin(coin());
-    const { writeFile } = await import("node:fs/promises");
-    await writeFile(join(dir, "db.json"), "{not json", "utf8");
-    // Drop the module-scope cache so the corrupt file is actually re-read.
-    vi.resetModules();
-    const s2 = await freshStore();
-    expect(await s2.listCoins()).toEqual([]);
+    const t = {
+      id: "t1", source: "google" as const, title: "x", score: 1,
+      startedAt: "2025-01-01T00:00:00.000Z", url: "u", context: "c",
+      firstSeenAt: "2025-01-01T00:00:00.000Z", isNew: false,
+    };
+
+    // Seed the trends table through the same stub the store uses. setTrends
+    // records every trend it is given as seen, so a single setTrends call can
+    // never observe the "new" branch — the seed has to happen underneath it.
+    expect(await s.getTrends()).toEqual([]);
+    await stubDb.query(
+      "INSERT INTO trends (id, source, title, score, started_at, url, context, first_seen_at, position, updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
+      ["t1", "google", "x", 1, t.startedAt, "u", "c", t.firstSeenAt, 0, t.startedAt],
+    );
+
+    // Not yet in radar_seen -> new.
+    expect((await s.getTrends())[0].isNew).toBe(true);
+
+    // Once the radar records the id as seen, it is no longer new.
+    await stubDb.query(
+      "INSERT INTO radar_seen (trend_id, first_seen) VALUES ($1, $2)",
+      ["t1", t.firstSeenAt],
+    );
+    expect((await s.getTrends())[0].isNew).toBe(false);
+    expect((await s.getRadarState()).recentTitles).toContain("x");
+  });
+
+  it("persists settings through radar_state", async () => {
+    const s = await freshStore();
+    await s.updateSettings({ enabled: true, buySol: 9 });
+    const next = await s.getRadarState();
+    expect(next.settings.enabled).toBe(true);
+    expect(next.settings.buySol).toBe(0);
   });
 });

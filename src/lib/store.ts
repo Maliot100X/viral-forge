@@ -5,16 +5,19 @@ import type {
   RadarState,
   Trend,
 } from "./types";
+import { durable, query, readState, writeState } from "./db";
 
 // ---------------------------------------------------------------------------
 // Persistence.
 //
-// JSON file store under .data/. Chosen over SQLite deliberately: this deploys to
-// Vercel's serverless runtime, where the filesystem is read-only and ephemeral,
-// so a native SQLite binding would fail at build and at runtime. The file store
-// degrades safely — if the FS is not writable, everything still serves from
-// memory and the app remains fully functional (records are just not persisted
-// across cold starts).
+// Backed by Postgres (Neon) via `./db`. The previous JSON-file implementation
+// is gone: on Vercel the filesystem is read-only and ephemeral, so it silently
+// degraded to per-instance memory and every cold start began with an empty
+// /coins. Records now survive cold starts and are shared across instances.
+//
+// When DATABASE_URL is absent the store still serves the API (empty reads,
+// no-op writes) but `persistence()` reports `"memory"` so the UI can say so
+// instead of implying data was saved.
 // ---------------------------------------------------------------------------
 
 export const DEFAULT_SETTINGS: RadarSettings = {
@@ -27,132 +30,341 @@ export const DEFAULT_SETTINGS: RadarSettings = {
   sources: { google: true, bluesky: true, mastodon: true, reddit: true },
 };
 
-interface DB {
-  coins: Coin[];
-  trends: Trend[];
-  log: RadarLogEntry[];
-  seen: string[];
+const STATE_SETTINGS = "settings";
+const STATE_COUNTERS = "counters";
+
+interface Counters {
   ticks: number;
   spentSol: number;
   launchesToday: number;
   budgetDay: string;
-  settings: RadarSettings;
 }
 
-const DATA_DIR = process.env.VIRAL_FORGE_DATA_DIR ?? ".data";
-const DB_FILE = `${DATA_DIR}/db.json`;
+function today(): string {
+  return new Date().toISOString().slice(0, 10);
+}
 
-function emptyDB(): DB {
+function defaultCounters(): Counters {
+  return { ticks: 0, spentSol: 0, launchesToday: 0, budgetDay: today() };
+}
+
+/** Whether records actually persist across cold starts. */
+export function persistence(): "postgres" | "memory" {
+  return durable() ? "postgres" : "memory";
+}
+
+// In-memory fallback. Only ever used when no database is configured, so it
+// never masks a configured-but-broken database.
+const memory: { coins: Coin[] } = { coins: [] };
+
+// --- row mapping ------------------------------------------------------------
+
+// The table's `status` column is the record's launch state. Only an actually
+// broadcast transaction may write 'LIVE' — see markCoinLive.
+const STATUS_LIVE = "LIVE";
+
+interface CoinRow {
+  id: number;
+  mint: string | null;
+  name: string;
+  ticker: string | null;
+  description: string | null;
+  tags: string[] | null;
+  logo_style: string | null;
+  logo_url: string | null;
+  source: string | null;
+  status: string | null;
+  create_sig: string | null;
+  mint_sig: string | null;
+  explorer: string | null;
+  created_at: Date | string;
+  image_prompt: string | null;
+  vibe: string | null;
+  source_ref: string | null;
+  launched_by: string | null;
+  pump_url: string | null;
+  cluster: string | null;
+  provenance: string | null;
+  image_provenance: string | null;
+}
+
+function iso(v: Date | string): string {
+  return v instanceof Date ? v.toISOString() : String(v);
+}
+
+function rowToCoin(r: CoinRow): Coin {
+  const live = r.status === STATUS_LIVE;
   return {
-    coins: [],
-    trends: [],
-    log: [],
-    seen: [],
-    ticks: 0,
-    spentSol: 0,
-    launchesToday: 0,
-    budgetDay: new Date().toISOString().slice(0, 10),
-    settings: { ...DEFAULT_SETTINGS, sources: { ...DEFAULT_SETTINGS.sources } },
+    // Rows written before a mint existed have none; fall back to a stable
+    // row-scoped id so they stay addressable instead of colliding on "".
+    id: r.mint ?? `row_${r.id}`,
+    name: r.name,
+    symbol: r.ticker ?? "",
+    description: r.description ?? "",
+    imageUrl: r.logo_url ?? "",
+    imagePrompt: r.image_prompt ?? "",
+    imageStyle: (r.logo_style as Coin["imageStyle"]) ?? "meme",
+    tags: r.tags ?? [],
+    vibe: r.vibe ?? "",
+    source: (r.source as Coin["source"]) ?? "prompt",
+    sourceRef: r.source_ref ?? "",
+    mint: r.mint ?? "",
+    createdAt: iso(r.created_at),
+    mode: live ? "live" : "simulated",
+    launchedBy: r.launched_by === "radar" ? "radar" : "user",
+    pumpUrl: r.pump_url || (r.mint ? `https://pump.fun/coin/${r.mint}` : ""),
+    txSignature: live ? (r.create_sig ?? undefined) : undefined,
+    explorerUrl: r.explorer ?? undefined,
+    cluster: (r.cluster as Coin["cluster"]) ?? undefined,
+    provenance: (r.provenance as Coin["provenance"]) ?? undefined,
+    imageProvenance: (r.image_provenance as Coin["imageProvenance"]) ?? undefined,
   };
 }
 
-// Module-scope cache. Survives across requests within a warm serverless
-// instance, and is the source of truth if the filesystem is unavailable.
-let cache: DB | null = null;
-let fsWritable = true;
-
-async function load(): Promise<DB> {
-  if (cache) return cache;
-  try {
-    const { readFile } = await import("node:fs/promises");
-    const raw = await readFile(DB_FILE, "utf8");
-    const parsed = JSON.parse(raw) as Partial<DB>;
-    cache = { ...emptyDB(), ...parsed };
-    cache.settings = {
-      ...DEFAULT_SETTINGS,
-      ...parsed.settings,
-      sources: { ...DEFAULT_SETTINGS.sources, ...parsed.settings?.sources },
-    };
-  } catch {
-    cache = emptyDB();
-  }
-  return cache;
-}
-
-async function persist(db: DB): Promise<void> {
-  if (!fsWritable) return;
-  try {
-    const { mkdir, writeFile } = await import("node:fs/promises");
-    await mkdir(DATA_DIR, { recursive: true });
-    await writeFile(DB_FILE, JSON.stringify(db, null, 2), "utf8");
-  } catch {
-    // Read-only FS (serverless). Keep serving from memory.
-    fsWritable = false;
-  }
+function sortNewestFirst(a: Coin, b: Coin): number {
+  return b.createdAt.localeCompare(a.createdAt);
 }
 
 // --- coins ------------------------------------------------------------------
 
 export async function listCoins(filter?: string): Promise<Coin[]> {
-  const db = await load();
-  const sorted = [...db.coins].sort((a, b) =>
-    b.createdAt.localeCompare(a.createdAt),
-  );
-  if (!filter || filter === "all") return sorted;
-  if (filter === "radar") return sorted.filter((c) => c.launchedBy === "radar");
-  if (filter === "manual") return sorted.filter((c) => c.launchedBy === "user");
-  if (filter === "live") return sorted.filter((c) => c.mode === "live");
-  if (filter === "simulated") return sorted.filter((c) => c.mode === "simulated");
-  return sorted;
+  let coins: Coin[];
+  if (durable()) {
+    const rows = await query<CoinRow>(
+      "SELECT * FROM coins ORDER BY created_at DESC, id DESC",
+    );
+    coins = rows.map(rowToCoin);
+  } else {
+    coins = [...memory.coins].sort(sortNewestFirst);
+  }
+  if (!filter || filter === "all") return coins;
+  if (filter === "radar") return coins.filter((c) => c.launchedBy === "radar");
+  if (filter === "manual") return coins.filter((c) => c.launchedBy === "user");
+  if (filter === "live") return coins.filter((c) => c.mode === "live");
+  if (filter === "simulated") return coins.filter((c) => c.mode === "simulated");
+  return coins;
 }
 
 export async function getCoin(mint: string): Promise<Coin | null> {
-  const db = await load();
-  return db.coins.find((c) => c.mint === mint || c.id === mint) ?? null;
+  if (durable()) {
+    const rows = await query<CoinRow>(
+      "SELECT * FROM coins WHERE mint = $1 OR id::text = $1 LIMIT 1",
+      [mint],
+    );
+    return rows[0] ? rowToCoin(rows[0]) : null;
+  }
+  return memory.coins.find((c) => c.mint === mint || c.id === mint) ?? null;
 }
 
 export async function addCoin(coin: Coin): Promise<Coin> {
-  const db = await load();
-  db.coins.unshift(coin);
-  await persist(db);
+  if (!durable()) {
+    memory.coins = [coin, ...memory.coins.filter((c) => c.mint !== coin.mint)];
+    return coin;
+  }
+  // A brand-new record is never live: status only becomes LIVE in
+  // markCoinLive, after a signature actually lands.
+  await query(
+    `INSERT INTO coins (
+       mint, name, ticker, description, tags, logo_style, logo_url, source,
+       status, create_sig, explorer, created_at, image_prompt, vibe,
+       source_ref, launched_by, pump_url, cluster, provenance, image_provenance
+     ) VALUES (
+       $1,$2,$3,$4,$5,$6,$7,$8,'SIM',NULL,NULL,$9,$10,$11,$12,$13,$14,$15,$16,$17
+     )
+     ON CONFLICT (mint) DO UPDATE SET
+       name = EXCLUDED.name,
+       ticker = EXCLUDED.ticker,
+       description = EXCLUDED.description,
+       tags = EXCLUDED.tags,
+       logo_style = EXCLUDED.logo_style,
+       logo_url = EXCLUDED.logo_url,
+       source = EXCLUDED.source,
+       image_prompt = EXCLUDED.image_prompt,
+       vibe = EXCLUDED.vibe,
+       source_ref = EXCLUDED.source_ref,
+       launched_by = EXCLUDED.launched_by,
+       pump_url = EXCLUDED.pump_url,
+       provenance = EXCLUDED.provenance,
+       image_provenance = EXCLUDED.image_provenance`,
+    [
+      coin.mint,
+      coin.name,
+      coin.symbol,
+      coin.description,
+      coin.tags ?? [],
+      coin.imageStyle,
+      coin.imageUrl,
+      coin.source,
+      coin.createdAt,
+      coin.imagePrompt,
+      coin.vibe,
+      coin.sourceRef,
+      coin.launchedBy,
+      coin.pumpUrl,
+      coin.cluster ?? null,
+      coin.provenance ?? null,
+      coin.imageProvenance ?? null,
+    ],
+  );
   return coin;
+}
+
+/**
+ * Attach the result of a confirmed on-chain launch to an existing record.
+ * This is the ONLY writer of status='LIVE' — a record becomes live here and
+ * nowhere else, so the flag always means a signature exists.
+ */
+export async function markCoinLive(
+  mint: string,
+  patch: Pick<Coin, "txSignature" | "explorerUrl" | "cluster">,
+): Promise<void> {
+  if (!durable()) {
+    memory.coins = memory.coins.map((c) =>
+      c.mint === mint ? ({ ...c, mode: "live", ...patch } as Coin) : c,
+    );
+    return;
+  }
+  await query(
+    `UPDATE coins SET
+       status     = $2,
+       create_sig = COALESCE($3, create_sig),
+       explorer   = COALESCE($4, explorer),
+       cluster    = COALESCE($5, cluster)
+     WHERE mint = $1`,
+    [
+      mint,
+      STATUS_LIVE,
+      patch.txSignature ?? null,
+      patch.explorerUrl ?? null,
+      patch.cluster ?? null,
+    ],
+  );
 }
 
 // --- trends -----------------------------------------------------------------
 
+interface TrendRow {
+  id: string;
+  source: string;
+  title: string;
+  score: number;
+  started_at: string;
+  url: string;
+  context: string;
+  first_seen_at: string;
+}
+
 export async function getTrends(): Promise<Trend[]> {
-  const db = await load();
-  return db.trends;
+  if (!durable()) return [];
+  const rows = await query<TrendRow>(
+    "SELECT * FROM trends ORDER BY position ASC, score DESC",
+  );
+  const seen = new Set(
+    (await query<{ trend_id: string }>("SELECT trend_id FROM radar_seen")).map(
+      (r) => r.trend_id,
+    ),
+  );
+  return rows.map((r) => ({
+    id: r.id,
+    source: r.source as Trend["source"],
+    title: r.title,
+    score: r.score,
+    startedAt: r.started_at,
+    url: r.url,
+    context: r.context,
+    firstSeenAt: r.first_seen_at,
+    isNew: !seen.has(r.id),
+  }));
 }
 
 export async function setTrends(trends: Trend[]): Promise<void> {
-  const db = await load();
-  const existing = new Set(db.seen);
-  db.trends = trends.map((t) => ({ ...t, isNew: !existing.has(t.id) }));
-  await persist(db);
+  if (!durable()) return;
+  const existing = new Set(
+    (await query<{ trend_id: string }>("SELECT trend_id FROM radar_seen")).map(
+      (r) => r.trend_id,
+    ),
+  );
+  await query("DELETE FROM trends");
+  for (const [i, t] of trends.entries()) {
+    await query(
+      `INSERT INTO trends
+         (id, source, title, score, started_at, url, context, first_seen_at, position, updated_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+       ON CONFLICT (id) DO UPDATE SET
+         score = EXCLUDED.score,
+         position = EXCLUDED.position,
+         updated_at = EXCLUDED.updated_at`,
+      [
+        t.id,
+        t.source,
+        t.title,
+        t.score,
+        t.startedAt,
+        t.url,
+        t.context,
+        t.firstSeenAt || new Date().toISOString(),
+        i,
+        new Date().toISOString(),
+      ],
+    );
+    if (!existing.has(t.id)) {
+      await query(
+        `INSERT INTO radar_seen (trend_id, first_seen) VALUES ($1, $2)
+         ON CONFLICT (trend_id) DO NOTHING`,
+        [t.id, new Date().toISOString()],
+      );
+    }
+  }
 }
 
 // --- radar ------------------------------------------------------------------
 
-export async function getRadarState(): Promise<RadarState> {
-  const db = await load();
-  const today = new Date().toISOString().slice(0, 10);
-  const resetsAt = `${today}T24:00:00.000Z`;
+async function getSettings(): Promise<RadarSettings> {
+  const stored = durable() ? await readState<Partial<RadarSettings>>(STATE_SETTINGS) : null;
   return {
-    settings: db.settings,
-    running: db.settings.enabled,
-    // Simulation-by-default: no radar wallet is configured in this build, so the
-    // radar never reports itself as capable of spending. See /radar copy.
+    ...DEFAULT_SETTINGS,
+    ...stored,
+    sources: { ...DEFAULT_SETTINGS.sources, ...stored?.sources },
+  };
+}
+
+async function getCounters(): Promise<Counters> {
+  const stored = durable() ? await readState<Counters>(STATE_COUNTERS) : null;
+  return { ...defaultCounters(), ...stored };
+}
+
+export async function getRadarState(): Promise<RadarState> {
+  const settings = await getSettings();
+  const counters = await getCounters();
+
+  const log: RadarLogEntry[] = durable()
+    ? await query<RadarLogEntry>(
+        "SELECT at, message FROM radar_log ORDER BY id DESC LIMIT 200",
+      )
+    : [];
+
+  const recentTitles = (await getTrends()).slice(0, 12).map((t) => t.title);
+
+  return {
+    settings,
+    running: settings.enabled,
+    // The radar never spends. buySol is clamped to 0 by updateSettings and the
+    // launch path still needs an explicit /api/launch confirmation, so the
+    // radar cannot report itself as able to sign.
     liveCapable: false,
-    seen: db.seen,
-    ticks: db.ticks,
+    seen: durable()
+      ? (await query<{ trend_id: string }>("SELECT trend_id FROM radar_seen")).map(
+          (r) => r.trend_id,
+        )
+      : [],
+    ticks: counters.ticks,
     budget: {
-      spentSol: db.spentSol,
-      launchesToday: db.launchesToday,
-      resetsAt,
+      spentSol: counters.spentSol,
+      launchesToday: counters.launchesToday,
+      resetsAt: `${today()}T24:00:00.000Z`,
     },
-    log: db.log,
-    recentTitles: db.trends.slice(0, 12).map((t) => t.title),
+    log,
+    recentTitles,
     adminRequired: false,
   };
 }
@@ -160,41 +372,52 @@ export async function getRadarState(): Promise<RadarState> {
 export async function updateSettings(
   patch: Partial<RadarSettings>,
 ): Promise<RadarSettings> {
-  const db = await load();
-  db.settings = {
-    ...db.settings,
+  const current = await getSettings();
+  const next: RadarSettings = {
+    ...current,
     ...patch,
-    sources: { ...db.settings.sources, ...(patch.sources ?? {}) },
+    sources: { ...current.sources, ...(patch.sources ?? {}) },
   };
   // Hard floor: this build cannot spend. buySol is clamped to 0 regardless of
   // what a client sends, and enabled is honoured only as a scanning flag.
-  db.settings.buySol = 0;
-  await persist(db);
-  return db.settings;
+  next.buySol = 0;
+  if (durable()) await writeState(STATE_SETTINGS, next);
+  return next;
 }
 
 export async function logRadar(
   message: string,
-  extra?: Partial<Pick<DB, "seen" | "ticks" | "spentSol" | "launchesToday">>,
+  extra?: Partial<Pick<Counters, "ticks" | "spentSol" | "launchesToday">> & {
+    seen?: string[];
+  },
 ): Promise<void> {
-  const db = await load();
-  const today = new Date().toISOString().slice(0, 10);
-  if (db.budgetDay !== today) {
-    db.budgetDay = today;
-    db.spentSol = 0;
-    db.launchesToday = 0;
-    db.log.unshift({
-      at: new Date().toISOString(),
-      message: `New day (${today}): daily budget reset`,
-    });
+  const counters = await getCounters();
+  const log: string[] = [];
+
+  if (counters.budgetDay !== today()) {
+    counters.budgetDay = today();
+    counters.spentSol = 0;
+    counters.launchesToday = 0;
+    log.push(`New day (${counters.budgetDay}): daily budget reset`);
   }
-  db.log.unshift({ at: new Date().toISOString(), message });
-  db.log = db.log.slice(0, 200);
   if (extra) {
-    if (extra.seen) db.seen = extra.seen;
-    if (typeof extra.ticks === "number") db.ticks = extra.ticks;
-    if (typeof extra.spentSol === "number") db.spentSol = extra.spentSol;
-    if (typeof extra.launchesToday === "number") db.launchesToday = extra.launchesToday;
+    if (typeof extra.ticks === "number") counters.ticks = extra.ticks;
+    if (typeof extra.spentSol === "number") counters.spentSol = extra.spentSol;
+    if (typeof extra.launchesToday === "number")
+      counters.launchesToday = extra.launchesToday;
   }
-  await persist(db);
+  log.push(message);
+
+  if (!durable()) return;
+  await writeState(STATE_COUNTERS, counters);
+  const now = new Date().toISOString();
+  for (const line of log) {
+    await query("INSERT INTO radar_log (at, message) VALUES ($1, $2)", [now, line]);
+  }
+  // Keep the log bounded, matching the old 200-entry trim.
+  await query(
+    `DELETE FROM radar_log WHERE id NOT IN (
+       SELECT id FROM radar_log ORDER BY id DESC LIMIT 200
+     )`,
+  );
 }

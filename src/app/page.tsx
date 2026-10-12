@@ -1,3 +1,4 @@
+import Link from "next/link";
 import Forge from "@/components/Forge";
 import TickerTape from "@/components/TickerTape";
 import CoinCard from "@/components/CoinCard";
@@ -106,9 +107,9 @@ export default async function Home() {
       <section className="mx-auto w-full max-w-6xl px-4 pb-6">
         <div className="mb-3 flex items-center gap-3">
           <h2 className="mono text-sm">recent forges</h2>
-          <a href="/coins" className="mono text-[11px] text-fg-dim hover:text-accent">
+          <Link href="/coins" className="mono text-[11px] text-fg-dim hover:text-accent">
             all →
-          </a>
+          </Link>
         </div>
 
         {coins.length === 0 ? (
@@ -135,9 +136,9 @@ export default async function Home() {
               {radar.ticks} scans · {radar.seen.length} seen topics ·{" "}
               {radar.budget.spentSol.toFixed(3)} SOL spent
             </span>
-            <a href="/radar" className="ml-auto hover:text-accent">
+            <Link href="/radar" className="ml-auto hover:text-accent">
               open →
-            </a>
+            </Link>
           </div>
           <div className="mt-3">
             {radar.log.slice(0, 3).map((l, i) => (
