@@ -4,6 +4,7 @@ import Starfield from "@/components/Starfield";
 import Nav from "@/components/Nav";
 import { Toasts } from "@/components/Toasts";
 import ProcessCompanion from "@/components/ProcessCompanion";
+import AgentDock from "@/components/AgentDock";
 
 export const metadata: Metadata = {
   title: "VIRAL.forge — Anything viral becomes a coin.",
@@ -44,6 +45,7 @@ export default function RootLayout({
             <Nav />
             <main className="flex-1">{children}</main>
             <ProcessCompanion />
+            <AgentDock />
             <footer className="border-t border-line px-4 py-6">
               <div className="mx-auto flex max-w-6xl flex-col gap-3 text-xs text-fg-faint">
                 <div className="flex flex-wrap items-center gap-3">
