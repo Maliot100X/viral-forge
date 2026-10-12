@@ -83,8 +83,39 @@ swap `src/lib/store.ts` for a hosted database.
 
 ## Environment
 
-No environment variables are required to run or build. `VIRAL_FORGE_DATA_DIR` is
-the only supported override.
+Every variable is optional: with none set the app runs on a local fallback brain,
+procedural logos and records coins off-chain. Setting them turns on the real
+engines, and `/api/status` reports which are actually live.
+
+| Variable | Purpose | Default / fallback |
+| --- | --- | --- |
+| `RIVER_API_KEY` | River AI key — real text brain | local template brain |
+| `RIVER_MODEL` | Model id | `deepseek-ai/DeepSeek-V4.1-Flash` |
+| `POLLINATIONS_API_KEY` | Pollinations key — real image generation | procedural SVG |
+| `POLLINATIONS_IMAGE_MODEL` | Image model id | `black-forest-labs/flux.1-schnell` |
+| `DEVNET_WALLET_KEY` | Devnet signing key (base58) | chain calls disabled |
+| `SOLANA_CLUSTER` | `devnet` or `mainnet-beta` | `devnet` |
+| `SOLANA_DEVNET_RPC_URL` | Devnet RPC endpoint | `https://api.devnet.solana.com` |
+| `SOLANA_MAINNET_RPC_URL` | Mainnet RPC endpoint | public mainnet RPC |
+| `ENABLE_MAINNET` | Must be exactly `true` to allow mainnet | `false` |
+| `SOLANA_MAINNET_WALLET_KEY` | Separate mainnet signing key | mainnet disabled |
+| `SITE_URL` | Absolute origin used in metadata | request host |
+| `VIRAL_FORGE_DATA_DIR` | Data store directory | `.data` |
+| `FIRECRAWL_API_KEY` | Optional trend scraping | built-in trend sources |
+
+### Mainnet is off by default, deliberately
+
+Mainnet requires **both** `SOLANA_CLUSTER=mainnet-beta` **and**
+`ENABLE_MAINNET=true`, plus a distinct `SOLANA_MAINNET_WALLET_KEY`. Two switches
+and a separate key, so a single mistaken variable cannot move real funds.
+
+### Sending requires explicit confirmation
+
+`POST /api/launch` returns `428 confirmation_required` with a transaction summary
+unless the body carries `confirm: true`. The UI sets that flag only after the user
+has seen the summary and clicked to approve, per the Solana Foundation skill
+guardrail W009. Every transfer is simulated first and refused if the simulation
+fails or the amount is below the rent-exempt floor.
 
 ## Credits
 
