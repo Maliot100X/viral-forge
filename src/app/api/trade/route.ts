@@ -2,9 +2,11 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import {
   OnchainError,
+  TOKEN_PROGRAM_ID,
   buyToken,
   readCurveState,
   sellToken,
+  tokenBalance,
   type CurveAccount,
 } from "@/lib/onchain";
 import {
@@ -14,7 +16,9 @@ import {
   quoteSell,
   spotPriceScaled,
 } from "@/lib/curve";
-import { activeCluster, launchWallet, walletAddress } from "@/lib/solana";
+import { activeCluster, connection, launchWallet, walletAddress } from "@/lib/solana";
+import { PublicKey } from "@solana/web3.js";
+import { getAssociatedTokenAddressSync } from "@solana/spl-token";
 import { getCoin, getCurveSecret, listTrades, recordTrade } from "@/lib/store";
 
 // Trading endpoint for coins launched here.
@@ -45,6 +49,15 @@ const Body = z.object({
   /** Slippage tolerance in basis points. 300 = 3%. */
   slippageBps: z.number().int().min(1).max(5_000).optional().default(300),
   confirm: z.boolean().optional().default(false),
+  /**
+   * The connected wallet that should own the trade.
+   *
+   * When present the trade is attributed to this address: the response reports
+   * this wallet's token balance, and the trade log records it as the trader.
+   * When absent the launch wallet trades, which is the labelled fallback —
+   * trading with ourselves rather than with a user.
+   */
+  traderPublicKey: z.string().min(32).max(44).optional(),
 });
 
 /** Loads a coin and its curve keypair, or explains precisely what is missing. */
@@ -91,6 +104,7 @@ export async function GET(req: Request) {
   const mint = url.searchParams.get("mint") ?? "";
   const action = url.searchParams.get("action") === "sell" ? "sell" : "buy";
   const amount = Number(url.searchParams.get("amount") ?? "0");
+  const holder = url.searchParams.get("holder");
 
   const found = await curveFor(mint);
   if (!found.ok) {
@@ -115,6 +129,27 @@ export async function GET(req: Request) {
 
   const trades = await listTrades(mint, 20);
 
+  // Holdings are read from chain for whoever is about to trade, so the sell
+  // presets are sized against a real balance rather than a number we remember.
+  // A read that fails is reported as null, never as zero — "we could not check"
+  // and "you hold nothing" are different answers and only one is safe to show.
+  let holdings: { owner: string; amount: string } | null = null;
+  if (holder) {
+    try {
+      const owner = new PublicKey(holder);
+      const ownerAta = getAssociatedTokenAddressSync(
+        new PublicKey(mint),
+        owner,
+        true,
+        TOKEN_PROGRAM_ID,
+      );
+      const amount = await tokenBalance(connection(), ownerAta);
+      holdings = { owner: owner.toBase58(), amount: amount.toString() };
+    } catch {
+      holdings = null;
+    }
+  }
+
   // A quote is only meaningful with an amount; without one the caller just
   // wants the current state, which is still worth returning.
   if (!(amount > 0)) {
@@ -124,6 +159,7 @@ export async function GET(req: Request) {
       curve,
       marketCapLamports: marketCapLamports(curve).toString(),
       price: formatPrice(spotPriceScaled(curve), 12),
+      holdings,
       trades,
       wallet: walletAddress(),
     });
@@ -147,6 +183,7 @@ export async function GET(req: Request) {
       priceAfter: quote.priceAfter.toString(),
       priceAfterLabel: formatPrice(quote.priceAfter, 12),
     },
+    holdings,
     price: formatPrice(spotPriceScaled(curve), 12),
     trades,
     wallet: walletAddress(),
@@ -251,12 +288,56 @@ export async function POST(req: Request) {
   }
 
   const wallet = launchWallet();
+
+  // Who owns the trade. A connected wallet trades into its own token account;
+  // with none connected the launch wallet trades, which is a real trade but one
+  // we are on both sides of. The response labels which happened.
+  let trader: PublicKey | undefined;
+  if (b.traderPublicKey) {
+    try {
+      trader = new PublicKey(b.traderPublicKey);
+    } catch {
+      return NextResponse.json(
+        { error: "invalid_trader", detail: `Not a valid Solana address: ${b.traderPublicKey}` },
+        { status: 400 },
+      );
+    }
+  }
+  const traderIsConnectedWallet = Boolean(
+    trader && wallet && !trader.equals(wallet.publicKey),
+  );
+
+  // The server holds exactly one secret key — the launch wallet's — and signs
+  // with it. A connected wallet therefore receives (or surrenders) the tokens
+  // while the launch wallet funds and pays. Saying so is better than implying
+  // the extension signed something; it did not, and it cannot, because its key
+  // never leaves the browser.
+  if (traderIsConnectedWallet && trader && b.action === "buy") {
+    const conn = connection();
+    const live = await conn.getBalance(trader).catch(() => null);
+    if (live !== null && live < 5_000) {
+      // Not fatal to the mechanics, but the honest thing is to say the
+      // connected wallet is not the payer before anything jumps out of it.
+      return NextResponse.json(
+        {
+          error: "invalid_trader",
+          detail:
+            "That wallet has no SOL. The launch wallet pays for the buy, and the tokens " +
+            "are delivered to the connected wallet — so it does not need SOL, but sending " +
+            "SOL to it would let you trade with your own funds.",
+        },
+        { status: 409 },
+      );
+    }
+  }
+
   try {
     const result =
       b.action === "buy"
         ? await buyToken({
             curve: found.curve,
             mint: b.mint,
+            trader,
             amount: b.amount,
             minOut,
             confirm: true,
@@ -264,6 +345,7 @@ export async function POST(req: Request) {
         : await sellToken({
             curve: found.curve,
             mint: b.mint,
+            trader,
             amount: b.amount,
             minOut,
             confirm: true,
@@ -275,7 +357,7 @@ export async function POST(req: Request) {
       mint: b.mint,
       action: b.action,
       signature: result.signature,
-      wallet: wallet?.publicKey.toBase58() ?? "",
+      wallet: trader?.toBase58() ?? wallet?.publicKey.toBase58() ?? "",
       solLamports:
         b.action === "buy" ? result.amountIn.toString() : result.amountOut.toString(),
       tokenAtoms:
@@ -300,6 +382,9 @@ export async function POST(req: Request) {
         priceAfter: formatPrice(result.priceAfter, 12),
         reserveSol: Number(result.curve.realSolReserve) / 1e9,
         // Read back on-chain, so a caller can verify the trade moved tokens.
+        trader: trader?.toBase58() ?? wallet?.publicKey.toBase58() ?? null,
+        /** True when the tokens went to a wallet other than the launch wallet. */
+        traderIsConnectedWallet,
         traderTokenBalance: result.traderTokenBalance,
         curveTokenBalance: result.curveTokenBalance,
         curve: result.curve,

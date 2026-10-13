@@ -629,8 +629,25 @@ export async function tokenBalance(
   c: Connection,
   account: PublicKey,
 ): Promise<bigint> {
-  const res = await c.getTokenAccountBalance(account).catch(() => null);
-  return res ? BigInt(res.value.amount) : 0n;
+  let res;
+  try {
+    res = await c.getTokenAccountBalance(account);
+  } catch (err) {
+    // A missing token account is a real, meaningful zero. A failed RPC call is
+    // NOT: collapsing the two once made a rate-limited read look like "this
+    // wallet holds nothing", which surfaced as a bogus "not enough tokens to
+    // stock the curve" error while the wallet in fact held the full supply.
+    const message = err instanceof Error ? err.message : String(err);
+    if (/could not find account|Invalid param: could not find account/i.test(message)) {
+      return 0n;
+    }
+    throw new OnchainError(
+      "rpc_failed",
+      `Could not read the token balance of ${account.toBase58()}: ${message}`,
+      err,
+    );
+  }
+  return BigInt(res.value.amount);
 }
 
 /**
@@ -901,6 +918,298 @@ export async function sellToken(args: TradeArgs): Promise<TradeResult> {
     throw new OnchainError(
       "send_failed",
       `Sell failed to send: ${err instanceof Error ? err.message : "unknown"}`,
+      err,
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Attaching a curve to a token that already exists
+// ---------------------------------------------------------------------------
+
+export interface AttachCurveArgs {
+  /** Mint of a token that already exists and whose supply we still control. */
+  mint: string;
+  /**
+   * Tokens to move onto the curve. This is NOT minted: it is transferred out of
+   * the supply already sitting in the launch wallet. Tokens cannot be minted
+   * here because `createCoin` revokes the mint authority, and that is the point
+   * — supply is final. A curve for an existing coin can therefore only be
+   * funded from what the wallet still holds.
+   */
+  curveSupply: bigint;
+  /** SOL the curve opens with. Must clear the curve rent floor. */
+  devBuySol: number;
+  /** Must be true. Guards against an accidental call. */
+  confirm: boolean;
+}
+
+export interface AttachedCurve {
+  mint: string;
+  curveAddress: string;
+  curveSecret: string;
+  /** Signature of the transaction that funded and stocked the curve. */
+  signature: string;
+  explorer: string;
+  /** Real lamports in the curve account, read back after it landed. */
+  curveLamports: number;
+  /** Real token balance the curve holds, read back after it landed. */
+  curveTokenBalance: string;
+  /** How much the launch wallet still holds after stocking the curve. */
+  walletTokenBalance: string;
+  decimals: number;
+  totalSupply: string;
+}
+
+/**
+ * Gives an already-launched token a real, funded bonding curve.
+ *
+ * `createCoin` can only open a curve at mint time. Coins launched before the
+ * curve existed have no `curveAddress`, so `/api/trade` refuses them and they
+ * can never be bought or sold — they are records, not markets. This function is
+ * the missing half: it attaches a curve to a mint that already exists.
+ *
+ * One signed transaction:
+ *
+ *   1. create the curve account (a real Keypair, because a sell pays SOL out
+ *      of it and derived addresses have no key to sign with)
+ *   2. fund it with `devBuySol` so it clears rent and can pay a seller
+ *   3. create the curve's token account
+ *   4. move `curveSupply` tokens from the launch wallet onto the curve
+ *
+ * Move, never mint: the mint authority is revoked, so the only honest source of
+ * a token side is the supply the wallet already holds.
+ *
+ * Afterwards the curve is read back off-chain and the call fails unless the
+ * tokens really arrived, so a coin is never recorded as tradeable on the
+ * strength of a signature alone.
+ */
+export async function attachCurve(
+  args: AttachCurveArgs,
+): Promise<AttachedCurve> {
+  if (args.confirm !== true) {
+    throw new OnchainError("create_failed", "attachCurve requires confirm: true.");
+  }
+  const kp = launchWallet();
+  if (!kp) {
+    throw new OnchainError("no_wallet", "No launch wallet is configured.");
+  }
+  if (activeCluster() === "mainnet-beta") {
+    throw new OnchainError(
+      "mainnet_locked",
+      "Attaching curves on mainnet is not enabled for this build.",
+    );
+  }
+  if (args.curveSupply <= 0n) {
+    throw new OnchainError(
+      "create_failed",
+      "A curve needs a token side, otherwise nobody can buy.",
+    );
+  }
+
+  const fundingLamports = BigInt(
+    Math.max(0, Math.round(args.devBuySol * LAMPORTS_PER_SOL)),
+  );
+  if (fundingLamports < CURVE_MIN_BALANCE) {
+    throw new OnchainError(
+      "create_failed",
+      `A curve needs at least ${Number(CURVE_MIN_BALANCE) / 1e9} SOL to stay rent-exempt; ${args.devBuySol} SOL would leave it unable to pay a seller.`,
+    );
+  }
+
+  const c = connection();
+  const mintKey = new PublicKey(args.mint);
+
+  // Read the mint first: we need the real decimals, and we need to know the
+  // wallet actually holds enough to stock the curve.
+  let mintInfo;
+  try {
+    mintInfo = await getMint(c, mintKey, "confirmed", TOKEN_PROGRAM_ID);
+  } catch (err) {
+    throw new OnchainError(
+      "create_failed",
+      `No SPL mint at ${args.mint}, so there is nothing to attach a curve to.`,
+      err,
+    );
+  }
+
+  const walletAta = getAssociatedTokenAddressSync(mintKey, kp.publicKey, true, TOKEN_PROGRAM_ID);
+  const held = await tokenBalance(c, walletAta);
+  if (held < args.curveSupply) {
+    throw new OnchainError(
+      "insufficient_funds",
+      `The launch wallet holds ${held} tokens but the curve needs ${args.curveSupply}, so it cannot be stocked.`,
+      { held: held.toString(), needed: args.curveSupply.toString() },
+    );
+  }
+
+  const curve = newCurveAccount();
+  const curveKey = curveKeypair(curve);
+  const curveAta = curveTokenAccount(curve.address, args.mint);
+
+  const balance = await c.getBalance(kp.publicKey);
+  const needed = fundingLamports + 5_000_000n;
+  if (BigInt(balance) < needed) {
+    throw new OnchainError(
+      "insufficient_funds",
+      `The launch wallet holds ${Number(balance) / 1e9} SOL but needs about ${Number(needed) / 1e9} SOL to open this curve.`,
+    );
+  }
+
+  try {
+    const tx = new Transaction();
+
+    // 1. Fund the curve account. This doubles as opening it: a system account
+    //    holding lamports exists, and its balance IS the reserve.
+    tx.add(
+      SystemProgram.transfer({
+        fromPubkey: kp.publicKey,
+        toPubkey: curveKey.publicKey,
+        lamports: fundingLamports,
+      }),
+    );
+
+    // 2. The curve's token account, so it can hold a token side at all.
+    tx.add(
+      createAssociatedTokenAccountInstruction(
+        kp.publicKey,
+        curveAta,
+        curveKey.publicKey,
+        mintKey,
+        TOKEN_PROGRAM_ID,
+      ),
+    );
+
+    // 3. Move tokens out of the wallet and onto the curve. A transfer, not a
+    //    mint: the supply is already final and this is the only honest source.
+    tx.add(
+      createTransferInstruction(
+        walletAta,
+        curveAta,
+        kp.publicKey,
+        args.curveSupply,
+        [],
+        TOKEN_PROGRAM_ID,
+      ),
+    );
+
+    const { blockhash } = await c.getLatestBlockhash("confirmed");
+    tx.recentBlockhash = blockhash;
+    tx.feePayer = kp.publicKey;
+    // Only the fee payer signs. The curve keypair is a transfer DESTINATION and
+    // an ATA owner, neither of which requires a signature — signing with it
+    // makes web3.js emit "Transaction references a signature that is
+    // unnecessary". The keypair is still needed for its secret, which is what
+    // lets the curve pay sellers later.
+    tx.sign(kp);
+
+    const signature = await c.sendRawTransaction(tx.serialize(), {
+      maxRetries: 3,
+      skipPreflight: false,
+    });
+    await confirmSignature(c, signature);
+
+    // Read the curve back. A signature is not evidence that the tokens moved.
+    const landedLamports = await c.getBalance(curveKey.publicKey);
+    const landedTokens = await tokenBalance(c, curveAta);
+    if (landedTokens !== args.curveSupply) {
+      throw new OnchainError(
+        "create_failed",
+        `The curve should hold ${args.curveSupply} tokens but holds ${landedTokens}, so it was not stocked and this coin is not tradeable.`,
+        { expected: args.curveSupply.toString(), actual: landedTokens.toString(), signature },
+      );
+    }
+
+    return {
+      mint: args.mint,
+      curveAddress: curve.address,
+      curveSecret: curve.secret,
+      signature,
+      explorer: explorerUrl(signature, "tx", activeCluster()),
+      curveLamports: landedLamports,
+      curveTokenBalance: landedTokens.toString(),
+      walletTokenBalance: (held - args.curveSupply).toString(),
+      decimals: mintInfo.decimals,
+      totalSupply: mintInfo.supply.toString(),
+    };
+  } catch (err) {
+    if (err instanceof OnchainError) throw err;
+    throw new OnchainError(
+      "send_failed",
+      `Attaching the curve failed: ${err instanceof Error ? err.message : "unknown"}`,
+      err,
+    );
+  }
+}
+
+/**
+ * Withdraws the SOL a curve is holding back to the launch wallet.
+ *
+ * The curve is a system account whose balance is the reserve, so this is a
+ * plain transfer signed by the curve key. It is deliberately only allowed when
+ * the curve holds no tokens: draining a stocked curve would leave buys taking
+ * SOL for nothing. `withdrawCurveSol` therefore refuses in that case rather
+ * than quietly bricking a live market.
+ */
+export async function withdrawCurveSol(args: {
+  curve: CurveAccount;
+  lamports: bigint;
+  /** Tokens still on the curve. Refuse to drain a stocked curve. */
+  curveTokenBalance?: bigint;
+  confirm: boolean;
+}): Promise<{ signature: string; explorer: string; withdrawn: string; remaining: number }> {
+  if (args.confirm !== true) {
+    throw new OnchainError("send_failed", "withdrawCurveSol requires confirm: true.");
+  }
+  const c = connection();
+  const curveKey = curveKeypair(args.curve);
+  const state = await readCurveState(args.curve.address);
+  if (!state.exists) {
+    throw new OnchainError("curve_not_found", "That curve account does not exist.");
+  }
+
+  if (args.curveTokenBalance && args.curveTokenBalance > 0n) {
+    throw new OnchainError(
+      "curve_not_found",
+      `That curve still holds ${args.curveTokenBalance} tokens, so it is a live market and its SOL cannot be withdrawn. Sell through it instead.`,
+    );
+  }
+
+  const spendable = state.spendableLamports;
+  const amount = args.lamports > spendable ? spendable : args.lamports;
+  if (amount <= 0n) {
+    throw new OnchainError(
+      "insufficient_funds",
+      "That curve holds nothing above its rent floor, so there is nothing to withdraw.",
+    );
+  }
+
+  try {
+    const tx = new Transaction();
+    tx.add(
+      SystemProgram.transfer({
+        fromPubkey: curveKey.publicKey,
+        toPubkey: launchWallet()!.publicKey,
+        lamports: amount,
+      }),
+    );
+    const { blockhash } = await c.getLatestBlockhash("confirmed");
+    tx.recentBlockhash = blockhash;
+    tx.feePayer = curveKey.publicKey;
+    tx.sign(curveKey);
+    const signature = await c.sendRawTransaction(tx.serialize(), { maxRetries: 3 });
+    await confirmSignature(c, signature);
+    return {
+      signature,
+      explorer: explorerUrl(signature, "tx", activeCluster()),
+      withdrawn: amount.toString(),
+      remaining: await c.getBalance(curveKey.publicKey),
+    };
+  } catch (err) {
+    if (err instanceof OnchainError) throw err;
+    throw new OnchainError(
+      "send_failed",
+      `Withdrawal failed: ${err instanceof Error ? err.message : "unknown"}`,
       err,
     );
   }

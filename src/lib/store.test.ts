@@ -72,7 +72,19 @@ describe("store", () => {
   it("filters by mode and launcher", async () => {
     const s = await freshStore();
     await s.addCoin(coin({ id: "c_1", mint: "mint1", launchedBy: "user", mode: "simulated" }));
-    await s.addCoin(coin({ id: "c_2", mint: "mint2", launchedBy: "radar", mode: "live" }));
+    // Live requires a signature (see the invariant tests below), so the live
+    // fixture carries one rather than asserting the mode flag alone.
+    await s.addCoin(
+      coin({
+        id: "c_2",
+        mint: "mint2",
+        launchedBy: "radar",
+        mode: "live",
+        txSignature: "sig-filter",
+        explorerUrl: "https://explorer.solana.com/tx/sig-filter?cluster=devnet",
+        cluster: "devnet",
+      }),
+    );
     expect(await s.listCoins("simulated")).toHaveLength(1);
     expect(await s.listCoins("live")).toHaveLength(1);
     expect(await s.listCoins("radar")).toHaveLength(1);
@@ -117,6 +129,51 @@ describe("store", () => {
     expect(next.sources.bluesky).toBe(true);
   });
 
+  // Regression: a row once sat in the live database with status='LIVE' and
+  // create_sig=NULL, pointing at an explorer *address* link. The site therefore
+  // advertised an on-chain coin that had never been minted. `mode` is derived
+  // from the signature, not read from the stored status, so that state can no
+  // longer be produced or rendered.
+  it("refuses to mark a coin live without a signature", async () => {
+    const s = await freshStore();
+    // A caller that omits the signature entirely.
+    await s.addCoin(coin({ id: "c_1", mint: "mint1", mode: "live", txSignature: undefined }));
+    // A caller that passes an empty string, which is not evidence of anything.
+    await s.addCoin(coin({ id: "c_2", mint: "mint2", mode: "live", txSignature: "" }));
+
+    for (const c of await s.listCoins()) {
+      expect(c.mode, `${c.name} was stored as live`).toBe("simulated");
+      expect(c.txSignature).toBeUndefined();
+      // An explorer link without a transaction is not evidence either.
+      expect(c.explorerUrl).toBeUndefined();
+    }
+  });
+
+  it("marks a coin live only when a signature is attached", async () => {
+    const s = await freshStore();
+    await s.addCoin(coin({ id: "c_1", mint: "mint1", mode: "simulated" }));
+    expect((await s.getCoin("mint1"))!.mode).toBe("simulated");
+
+    await s.markCoinLive("mint1", {
+      txSignature: "sig-real",
+      explorerUrl: "https://explorer.solana.com/tx/sig-real?cluster=devnet",
+      cluster: "devnet",
+    });
+
+    const live = (await s.getCoin("mint1"))!;
+    expect(live.mode).toBe("live");
+    expect(live.txSignature).toBe("sig-real");
+    expect(live.explorerUrl).toContain("sig-real");
+    expect(live.cluster).toBe("devnet");
+  });
+
+  it("does not report a cluster for a coin that is not live", async () => {
+    const s = await freshStore();
+    await s.addCoin(
+      coin({ id: "c_1", mint: "mint1", mode: "live", cluster: "devnet", txSignature: undefined }),
+    );
+    expect((await s.getCoin("mint1"))!.cluster).toBeUndefined();
+  });
 });
 
 describe("store against a stubbed postgres", () => {

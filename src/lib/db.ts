@@ -142,6 +142,44 @@ CREATE TABLE IF NOT EXISTS radar_state (
   key    TEXT PRIMARY KEY,
   value  JSONB NOT NULL
 );
+
+-- Autonomous trading agents. The agent row stores the STRATEGY only; the agent
+-- never holds a key and never signs. Every fill it proposes goes through the
+-- same /api/trade confirm gate a human uses.
+CREATE TABLE IF NOT EXISTS trading_agents (
+  id             TEXT PRIMARY KEY,
+  name           TEXT NOT NULL,
+  mint           TEXT NOT NULL,
+  prompt         TEXT NOT NULL DEFAULT '',
+  budget_sol     NUMERIC NOT NULL DEFAULT 0,
+  max_trade_sol  NUMERIC NOT NULL DEFAULT 0,
+  slippage_bps   INTEGER NOT NULL DEFAULT 300,
+  api_key        TEXT,
+  status         TEXT NOT NULL DEFAULT 'idle',
+  spent_sol      NUMERIC NOT NULL DEFAULT 0,
+  realized_sol   NUMERIC NOT NULL DEFAULT 0,
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS trading_agents_mint_idx ON trading_agents (mint, created_at DESC);
+
+-- One row per decision the agent made, whether or not it traded.
+CREATE TABLE IF NOT EXISTS agent_runs (
+  id            BIGSERIAL PRIMARY KEY,
+  agent_id      TEXT NOT NULL,
+  mint          TEXT NOT NULL,
+  action        TEXT NOT NULL,
+  amount        NUMERIC NOT NULL DEFAULT 0,
+  reason        TEXT NOT NULL DEFAULT '',
+  provenance    TEXT NOT NULL DEFAULT 'local',
+  model         TEXT,
+  signature     TEXT,
+  explorer      TEXT,
+  error         TEXT,
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS agent_runs_agent_idx ON agent_runs (agent_id, created_at DESC);
 `;
 
 /** Idempotent schema creation. Cached per instance; retried on failure. */

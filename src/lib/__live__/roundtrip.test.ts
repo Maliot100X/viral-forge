@@ -1,7 +1,12 @@
 // Real round-trip against the live Neon database.
 //
-// Not picked up by `npm test` (which only includes src/**/*.test.ts and clears
-// DATABASE_URL). Run explicitly:
+// NOTE: vitest's `include` is `src/**/*.test.ts` with no exclude, so `npm test`
+// DOES run this file. It loads /home/coder/.env itself, so it reaches Neon even
+// when DATABASE_URL is unset in the shell — the store's in-memory fallback does
+// not apply here. That is deliberate: this is the test that proves the live
+// database actually obeys the app's invariants.
+//
+// Run it on its own with:
 //   npx vitest run src/lib/__live__/roundtrip.test.ts
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";

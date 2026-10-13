@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import { useToast } from "./Toasts";
+import { bindWallet, shortAddress, toggleWallet, useWallet } from "@/lib/wallet";
 
 /**
  * Nav — top bar from the reference site: wordmark, 4 links, network badge,
@@ -22,32 +23,20 @@ import { useToast } from "./Toasts";
  * ever reaches this component.
  */
 
-/** The subset of the Solana wallet-standard provider this UI actually uses. */
-interface InjectedProvider {
-  isPhantom?: boolean;
-  publicKey?: { toString(): string } | null;
-  connect(opts?: { onlyIfTrusted?: boolean }): Promise<{ publicKey: { toString(): string } }>;
-  disconnect?(): Promise<void>;
-  on?(event: string, handler: (...args: never[]) => void): void;
-  removeListener?(event: string, handler: (...args: never[]) => void): void;
-}
-
-function getProvider(): InjectedProvider | null {
-  if (typeof window === "undefined") return null;
-  const w = window as unknown as {
-    phantom?: { solana?: InjectedProvider };
-    solana?: InjectedProvider;
-    solflare?: InjectedProvider;
-  };
-  return w.phantom?.solana ?? w.solana ?? w.solflare ?? null;
-}
+/** The nav links, shared by the desktop and mobile rows so they cannot drift. */
+const LINKS: Array<[string, string]> = [
+  ["Forge", "/"],
+  ["Trend Radar", "/radar"],
+  ["Launched", "/coins"],
+  ["Agents", "/agents"],
+  ["Tokenomics", "/tokenomics"],
+];
 
 export default function Nav() {
   const { push } = useToast();
   const [sfx, setSfx] = useState(false);
-  const [address, setAddress] = useState<string | null>(null);
+  const { address, connecting, available } = useWallet();
   const [cluster, setCluster] = useState<string | null>(null);
-  const [connecting, setConnecting] = useState(false);
 
   // Read the cluster the server is really on. A failure here just leaves the
   // badge blank rather than asserting a network we cannot verify.
@@ -68,64 +57,23 @@ export default function Nav() {
     };
   }, []);
 
-  // Adopt an already-authorised account, and track the extension's own
-  // connect/disconnect events so the button never disagrees with the wallet.
-  useEffect(() => {
-    const provider = getProvider();
-    if (!provider) return;
+  // Adopt an already-authorised account and track the extension's own events.
+  // The store is shared, so the trade panel sees the same address.
+  useEffect(() => bindWallet(), []);
 
-    provider
-      .connect({ onlyIfTrusted: true })
-      .then((res) => setAddress(res.publicKey.toString()))
-      .catch(() => {
-        /* not previously authorised — expected on a first visit */
-      });
-
-    const onConnect = () => {
-      const pk = provider.publicKey?.toString();
-      if (pk) setAddress(pk);
-    };
-    const onDisconnect = () => setAddress(null);
-
-    provider.on?.("connect", onConnect);
-    provider.on?.("disconnect", onDisconnect);
-    return () => {
-      provider.removeListener?.("connect", onConnect);
-      provider.removeListener?.("disconnect", onDisconnect);
-    };
-  }, []);
-
-  const toggleWallet = useCallback(async () => {
-    const provider = getProvider();
-    if (!provider) {
-      push("No Solana wallet found. Install Phantom or Solflare.", "info");
-      return;
-    }
-
-    if (address) {
-      try {
-        await provider.disconnect?.();
-      } catch {
-        /* some providers throw if already disconnected */
+  const onToggleWallet = useCallback(async () => {
+    const res = await toggleWallet();
+    if (!res.ok) {
+      if (res.reason === "no_provider") {
+        push("No Solana wallet found. Install Phantom or Solflare.", "info");
+      } else {
+        // A user-closed prompt lands here and is not worth shouting about.
+        push("Wallet connection declined", "info");
       }
-      setAddress(null);
-      push("Disconnected", "info");
       return;
     }
-
-    setConnecting(true);
-    try {
-      const res = await provider.connect();
-      const pk = res.publicKey.toString();
-      setAddress(pk);
-      push(`Connected ${pk.slice(0, 4)}…${pk.slice(-4)}`, "ok");
-    } catch {
-      // A user-closed prompt lands here and is not an error worth shouting about.
-      push("Wallet connection declined", "info");
-    } finally {
-      setConnecting(false);
-    }
-  }, [address, push]);
+    push(res.address ? `Connected ${shortAddress(res.address)}` : "Disconnected", res.address ? "ok" : "info");
+  }, [push]);
 
   return (
     <header className="sticky top-0 z-40 border-b border-line bg-bg/85 backdrop-blur">
@@ -134,13 +82,8 @@ export default function Nav() {
           VIRAL<span className="text-accent">.forge</span>
         </Link>
 
-        <nav className="hidden items-center gap-1 md:flex">
-          {[
-            ["Forge", "/"],
-            ["Trend Radar", "/radar"],
-            ["Launched", "/coins"],
-            ["Tokenomics", "/tokenomics"],
-          ].map(([label, href]) => (
+        <nav className="hidden items-center gap-1 lg:flex">
+          {LINKS.map(([label, href]) => (
             <Link key={href} href={href} className="tab">
               {label}
             </Link>
@@ -174,12 +117,17 @@ export default function Nav() {
             className="btn"
             aria-busy={connecting}
             disabled={connecting}
-            onClick={toggleWallet}
+            onClick={onToggleWallet}
+            title={
+              available
+                ? address
+                  ? `Connected: ${address}`
+                  : "Connect a Solana wallet"
+                : "No Solana wallet detected in this browser"
+            }
           >
             {address ? (
-              <span className="mono">
-                {address.slice(0, 4)}…{address.slice(-4)}
-              </span>
+              <span className="mono">{shortAddress(address)}</span>
             ) : connecting ? (
               "connecting…"
             ) : (
@@ -189,13 +137,8 @@ export default function Nav() {
         </div>
       </div>
 
-      <nav className="flex items-center gap-1 overflow-x-auto border-t border-line px-4 py-2 md:hidden">
-        {[
-          ["Forge", "/"],
-          ["Trend Radar", "/radar"],
-          ["Launched", "/coins"],
-          ["Tokenomics", "/tokenomics"],
-        ].map(([label, href]) => (
+      <nav className="flex items-center gap-1 overflow-x-auto border-t border-line px-4 py-2 lg:hidden">
+        {LINKS.map(([label, href]) => (
           <Link key={href} href={href} className="tab whitespace-nowrap">
             {label}
           </Link>

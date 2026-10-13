@@ -128,7 +128,15 @@ function iso(v: Date | string): string {
 }
 
 function rowToCoin(r: CoinRow): Coin {
-  const live = r.status === STATUS_LIVE;
+  // A coin is live only when there is a signature proving a transaction landed.
+  //
+  // This is derived from `create_sig`, not read from `status`, on purpose. A row
+  // once existed with status='LIVE' and create_sig=NULL (an explorer *address*
+  // link, no transaction), which made the site advertise an on-chain coin that
+  // was never minted. Deriving here means no writer — present or future — can
+  // produce that state, and any row already in it is read as simulated rather
+  // than deleted.
+  const live = r.status === STATUS_LIVE && Boolean(r.create_sig);
   return {
     // Rows written before a mint existed have none; fall back to a stable
     // row-scoped id so they stay addressable instead of colliding on "".
@@ -149,8 +157,10 @@ function rowToCoin(r: CoinRow): Coin {
     launchedBy: r.launched_by === "radar" ? "radar" : "user",
     pumpUrl: r.pump_url || (r.mint ? `https://pump.fun/coin/${r.mint}` : ""),
     txSignature: live ? (r.create_sig ?? undefined) : undefined,
-    explorerUrl: r.explorer ?? undefined,
-    cluster: (r.cluster as Coin["cluster"]) ?? undefined,
+    // Only meaningful as evidence of a real transaction, so a row that claims
+    // live without a signature does not keep advertising an explorer link.
+    explorerUrl: live ? (r.explorer ?? undefined) : undefined,
+    cluster: live ? ((r.cluster as Coin["cluster"]) ?? undefined) : undefined,
     provenance: (r.provenance as Coin["provenance"]) ?? undefined,
     imageProvenance: (r.image_provenance as Coin["imageProvenance"]) ?? undefined,
     curveAddress: r.curve_address ?? undefined,
@@ -164,6 +174,30 @@ function sortNewestFirst(a: Coin, b: Coin): number {
   return b.createdAt.localeCompare(a.createdAt);
 }
 
+/**
+ * Applies the live-means-signed invariant to a coin from either backend.
+ *
+ * The SQL path enforces this at write time (a new row is inserted as 'SIM'
+ * with a NULL signature, and only markCoinLive may change that). The in-memory
+ * fallback stores whatever object it was handed, so without this the two
+ * backends would disagree about whether the same coin is live -- and the memory
+ * path is the one used when no database is configured.
+ *
+ * Anything that presents itself as live without a signature is downgraded to
+ * simulated rather than rejected, so a bad row is never advertised as an
+ * on-chain coin and never has to be deleted to be safe.
+ */
+function normalizeCoin(coin: Coin): Coin {
+  if (coin.mode === "live" && coin.txSignature) return coin;
+  return {
+    ...coin,
+    mode: "simulated",
+    txSignature: undefined,
+    explorerUrl: undefined,
+    cluster: undefined,
+  };
+}
+
 // --- coins ------------------------------------------------------------------
 
 export async function listCoins(filter?: string): Promise<Coin[]> {
@@ -174,7 +208,9 @@ export async function listCoins(filter?: string): Promise<Coin[]> {
     );
     coins = rows.map(rowToCoin);
   } else {
-    coins = [...memory.coins].sort(sortNewestFirst);
+    // Normalized on read, not on write: an object handed straight to the
+    // in-memory store must obey the same invariant a SQL row does.
+    coins = [...memory.coins].sort(sortNewestFirst).map(normalizeCoin);
   }
   if (!filter || filter === "all") return coins;
   if (filter === "radar") return coins.filter((c) => c.launchedBy === "radar");
@@ -192,13 +228,15 @@ export async function getCoin(mint: string): Promise<Coin | null> {
     );
     return rows[0] ? rowToCoin(rows[0]) : null;
   }
-  return memory.coins.find((c) => c.mint === mint || c.id === mint) ?? null;
+  const found = memory.coins.find((c) => c.mint === mint || c.id === mint);
+  return found ? normalizeCoin(found) : null;
 }
 
 export async function addCoin(coin: Coin): Promise<Coin> {
   if (!durable()) {
-    memory.coins = [coin, ...memory.coins.filter((c) => c.mint !== coin.mint)];
-    return coin;
+    const next = normalizeCoin(coin);
+    memory.coins = [next, ...memory.coins.filter((c) => c.mint !== coin.mint)];
+    return next;
   }
   // A brand-new record is never live: status only becomes LIVE in
   // markCoinLive, after a signature actually lands.
@@ -270,6 +308,11 @@ export async function markCoinLive(
   patch: Pick<Coin, "txSignature" | "explorerUrl" | "cluster">,
 ): Promise<void> {
   if (!durable()) {
+    // A patch without a signature is not evidence that a transaction landed,
+    // so it must not flip the record. This mirrors the SQL branch, which
+    // COALESCEs the signature and would leave status='LIVE' with a NULL
+    // signature only if a caller passed one — which this now rejects up front.
+    if (!patch.txSignature) return;
     memory.coins = memory.coins.map((c) =>
       c.mint === mint ? ({ ...c, mode: "live", ...patch } as Coin) : c,
     );
@@ -288,6 +331,55 @@ export async function markCoinLive(
       patch.txSignature ?? null,
       patch.explorerUrl ?? null,
       patch.cluster ?? null,
+    ],
+  );
+}
+
+// --- curves -----------------------------------------------------------------
+
+/**
+ * Records a curve against a coin that already exists.
+ *
+ * Used by the backfill, which attaches curves to coins minted before the curve
+ * existed. Deliberately writes ONLY curve columns: status, create_sig and the
+ * rest belong to the launch path and must not be disturbed here. The secret
+ * goes to Postgres and is never read back into a client-facing shape.
+ */
+export async function setCoinCurve(args: {
+  mint: string;
+  curveAddress: string;
+  curveSecret: string;
+  initialBuySol?: number;
+  mintAuthority?: string | null;
+  tokenProgram?: string | null;
+}): Promise<void> {
+  if (!durable()) {
+    memory.coins = memory.coins.map((c) =>
+      c.mint === args.mint
+        ? ({
+            ...c,
+            curveAddress: args.curveAddress,
+            initialBuySol: args.initialBuySol ?? c.initialBuySol,
+          } as Coin)
+        : c,
+    );
+    return;
+  }
+  await query(
+    `UPDATE coins SET
+       curve_address   = $2,
+       curve_secret    = $3,
+       initial_buy_sol = COALESCE($4, initial_buy_sol),
+       mint_authority  = COALESCE($5, mint_authority),
+       token_program   = COALESCE($6, token_program)
+     WHERE mint = $1`,
+    [
+      args.mint,
+      args.curveAddress,
+      args.curveSecret,
+      args.initialBuySol ?? null,
+      args.mintAuthority ?? null,
+      args.tokenProgram ?? null,
     ],
   );
 }
@@ -554,3 +646,229 @@ export async function listTrades(mint: string, limit = 50): Promise<TradeRecord[
     createdAt: iso(r.created_at),
   }));
 }
+
+// --- trading agents ---------------------------------------------------------
+
+/**
+ * An autonomous trading agent.
+ *
+ * The row holds a *strategy*, never a key to the curve reserve. `apiKey` is the
+ * agent's own optional brain key; when absent the server's key is used. Nothing
+ * here can sign a transaction — an agent's decision is a proposal that still
+ * has to clear the same confirm gate a human click does.
+ */
+export interface TradingAgentRecord {
+  id: string;
+  name: string;
+  mint: string;
+  prompt: string;
+  budgetSol: number;
+  maxTradeSol: number;
+  slippageBps: number;
+  apiKey: string | null;
+  status: string;
+  spentSol: number;
+  realizedSol: number;
+  createdAt: string;
+}
+
+/** One agent decision, recorded whether or not it resulted in a trade. */
+export interface AgentRunRecord {
+  id: number;
+  agentId: string;
+  mint: string;
+  action: string;
+  amount: number;
+  reason: string;
+  provenance: string;
+  model: string | null;
+  signature: string | null;
+  explorer: string | null;
+  error: string | null;
+  createdAt: string;
+}
+
+interface AgentRow {
+  id: string;
+  name: string;
+  mint: string;
+  prompt: string | null;
+  budget_sol: string | null;
+  max_trade_sol: string | null;
+  slippage_bps: number | null;
+  api_key: string | null;
+  status: string | null;
+  spent_sol: string | null;
+  realized_sol: string | null;
+  created_at: Date | string;
+}
+
+interface AgentRunRow {
+  id: number;
+  agent_id: string;
+  mint: string;
+  action: string;
+  amount: string | null;
+  reason: string | null;
+  provenance: string | null;
+  model: string | null;
+  signature: string | null;
+  explorer: string | null;
+  error: string | null;
+  created_at: Date | string;
+}
+
+/** NUMERIC comes back from pg as a string; never let it reach the API as one. */
+function num(v: string | null | undefined, fallback = 0): number {
+  if (v == null) return fallback;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function rowToAgent(r: AgentRow): TradingAgentRecord {
+  return {
+    id: r.id,
+    name: r.name,
+    mint: r.mint,
+    prompt: r.prompt ?? "",
+    budgetSol: num(r.budget_sol),
+    maxTradeSol: num(r.max_trade_sol),
+    slippageBps: r.slippage_bps ?? 300,
+    apiKey: r.api_key,
+    status: r.status ?? "idle",
+    spentSol: num(r.spent_sol),
+    realizedSol: num(r.realized_sol),
+    createdAt: iso(r.created_at),
+  };
+}
+
+function rowToRun(r: AgentRunRow): AgentRunRecord {
+  return {
+    id: r.id,
+    agentId: r.agent_id,
+    mint: r.mint,
+    action: r.action,
+    amount: num(r.amount),
+    reason: r.reason ?? "",
+    provenance: r.provenance ?? "local",
+    model: r.model,
+    signature: r.signature,
+    explorer: r.explorer,
+    error: r.error,
+    createdAt: iso(r.created_at),
+  };
+}
+
+/**
+ * The stored agent, with its API key stripped.
+ *
+ * The key is only ever needed server-side, inside the run handler. Returning it
+ * from /api/agents would hand every visitor the ability to spend the owner's
+ * brain credits.
+ */
+export function publicAgent(a: TradingAgentRecord): Omit<TradingAgentRecord, "apiKey"> & {
+  hasApiKey: boolean;
+} {
+  const { apiKey, ...rest } = a;
+  return { ...rest, hasApiKey: Boolean(apiKey) };
+}
+
+export async function addAgent(agent: TradingAgentRecord): Promise<void> {
+  if (!durable()) return;
+  await query(
+    `INSERT INTO trading_agents (
+       id, name, mint, prompt, budget_sol, max_trade_sol, slippage_bps,
+       api_key, status, spent_sol, realized_sol
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+    [
+      agent.id,
+      agent.name,
+      agent.mint,
+      agent.prompt,
+      agent.budgetSol,
+      agent.maxTradeSol,
+      agent.slippageBps,
+      agent.apiKey,
+      agent.status,
+      agent.spentSol,
+      agent.realizedSol,
+    ],
+  );
+}
+
+export async function getAgent(id: string): Promise<TradingAgentRecord | null> {
+  if (!durable()) return null;
+  const rows = await query<AgentRow>(
+    "SELECT * FROM trading_agents WHERE id = $1 LIMIT 1",
+    [id],
+  );
+  return rows.length ? rowToAgent(rows[0]) : null;
+}
+
+export async function listAgents(mint?: string): Promise<TradingAgentRecord[]> {
+  if (!durable()) return [];
+  const rows = mint
+    ? await query<AgentRow>(
+        "SELECT * FROM trading_agents WHERE mint = $1 ORDER BY created_at DESC",
+        [mint],
+      )
+    : await query<AgentRow>("SELECT * FROM trading_agents ORDER BY created_at DESC");
+  return rows.map(rowToAgent);
+}
+
+export async function setAgentStatus(id: string, status: string): Promise<void> {
+  if (!durable()) return;
+  await query("UPDATE trading_agents SET status = $2 WHERE id = $1", [id, status]);
+}
+
+/**
+ * Records a decision.
+ *
+ * `spentSol`/`realizedSol` move only when `signature` is set, so a decision the
+ * agent merely proposed — or one whose transaction failed — cannot inflate the
+ * budget ledger it is judged against.
+ */
+export async function recordAgentRun(
+  run: Omit<AgentRunRecord, "id" | "createdAt">,
+): Promise<void> {
+  if (!durable()) return;
+  await query(
+    `INSERT INTO agent_runs (
+       agent_id, mint, action, amount, reason, provenance, model,
+       signature, explorer, error
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+    [
+      run.agentId,
+      run.mint,
+      run.action,
+      run.amount,
+      run.reason,
+      run.provenance,
+      run.model,
+      run.signature,
+      run.explorer,
+      run.error,
+    ],
+  );
+
+  if (run.signature) {
+    const column = run.action === "sell" ? "realized_sol" : "spent_sol";
+    await query(
+      `UPDATE trading_agents SET ${column} = ${column} + $2 WHERE id = $1`,
+      [run.agentId, run.amount],
+    );
+  }
+}
+
+export async function listAgentRuns(
+  agentId: string,
+  limit = 50,
+): Promise<AgentRunRecord[]> {
+  if (!durable()) return [];
+  const rows = await query<AgentRunRow>(
+    "SELECT * FROM agent_runs WHERE agent_id = $1 ORDER BY id DESC LIMIT $2",
+    [agentId, limit],
+  );
+  return rows.map(rowToRun);
+}
+
