@@ -241,6 +241,26 @@ body {
   animation: blink 1.4s steps(2, start) infinite;
 }
 
+/* Pixel-block loader used by the 3D host while the body streams in. */
+.px-loader {
+  width: 34px;
+  height: 6px;
+  background: var(--accent);
+  box-shadow:
+    -12px 0 0 var(--line-bright),
+    12px 0 0 var(--line-bright);
+  animation: px-loader 1.05s steps(2, start) infinite;
+}
+
+@keyframes px-loader {
+  0%, 100% { transform: translateX(-6px); opacity: 1; }
+  50% { transform: translateX(6px); opacity: 0.55; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .px-loader { animation: none; }
+}
+
 @keyframes blink {
   to { visibility: hidden; }
 }

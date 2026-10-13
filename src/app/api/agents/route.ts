@@ -25,6 +25,7 @@ import {
   recordAgentRun,
   recordTrade,
   setAgentStatus,
+  type TradingAgentRecord,
 } from "@/lib/store";
 import {
   allowances,
@@ -58,6 +59,16 @@ const CreateBody = z.object({
   slippageBps: z.number().int().min(1).max(5_000).optional(),
   /** Optional per-agent brain key. Stored, never returned. */
   apiKey: z.string().min(8).max(200).optional(),
+  /** Catalog id (`xbot`) or an absolute https GLB URL. */
+  avatar: z.string().max(400).optional().default(""),
+  tagline: z.string().max(140).optional().default(""),
+  /**
+   * `platform` trades from the server's launch wallet. `creator` trades from the
+   * connected wallet, which means the user signs — see `traderPublicKey`.
+   */
+  walletMode: z.enum(["platform", "creator"]).optional().default("platform"),
+  /** Required when `walletMode` is `creator`. Public key only. */
+  traderPublicKey: z.string().min(32).max(44).optional(),
 });
 
 const RunBody = z.object({
@@ -162,7 +173,33 @@ async function create(b: z.infer<typeof CreateBody>) {
     "Trade this curve conservatively: accumulate while it is early, take profit into strength.";
   const strategy = strategyFor(prompt, partial);
 
-  const agent = {
+  // A creator-funded agent needs a real public key to trade from. We only ever
+  // store the public half: the server cannot sign for that wallet, so every fill
+  // is proposed and the owner confirms it in their own wallet.
+  let traderPubkey = "";
+  if (b.walletMode === "creator") {
+    if (!b.traderPublicKey) {
+      return NextResponse.json(
+        {
+          error: "trader_required",
+          detail:
+            "walletMode \"creator\" needs traderPublicKey — connect a devnet wallet " +
+            "first, or create the agent on the platform wallet.",
+        },
+        { status: 400 },
+      );
+    }
+    try {
+      traderPubkey = new PublicKey(b.traderPublicKey).toBase58();
+    } catch {
+      return NextResponse.json(
+        { error: "invalid_trader", detail: "traderPublicKey is not a base58 pubkey." },
+        { status: 400 },
+      );
+    }
+  }
+
+  const agent: TradingAgentRecord = {
     id: "ag_" + generateCoinId().slice(2),
     name: b.name,
     mint: b.mint,
@@ -175,6 +212,10 @@ async function create(b: z.infer<typeof CreateBody>) {
     spentSol: 0,
     realizedSol: 0,
     createdAt: new Date().toISOString(),
+    avatarGlbUrl: b.avatar,
+    tagline: b.tagline,
+    walletMode: b.walletMode,
+    traderPubkey,
   };
 
   await addAgent(agent);
@@ -247,14 +288,22 @@ async function run(b: z.infer<typeof RunBody>) {
   // and never take profit — a strategy that silently cannot exit. A failed read
   // is not turned into a confident zero either; see the `heldTokensRead` flag
   // carried into the decision context.
+  //
+  // Which wallet that is depends on `walletMode`: a creator-funded agent trades
+  // from the owner's own key, which the server cannot sign for, so the decision
+  // is returned as a proposal the wallet confirms itself.
+  const creatorFunded = agent.walletMode === "creator" && Boolean(agent.traderPubkey);
+  const holderKey = creatorFunded
+    ? new PublicKey(agent.traderPubkey)
+    : launchWallet()?.publicKey ?? null;
+
   let heldTokens = 0n;
   let heldTokensRead = false;
   try {
-    const kp = launchWallet();
-    if (!kp) throw new Error("no_wallet");
+    if (!holderKey) throw new Error("no_wallet");
     const ata = getAssociatedTokenAddressSync(
       new PublicKey(agent.mint),
-      kp.publicKey,
+      holderKey,
       true,
       TOKEN_PROGRAM_ID,
     );
@@ -359,6 +408,57 @@ async function run(b: z.infer<typeof RunBody>) {
         },
       },
       { status: 428 },
+    );
+  }
+
+  // A creator-funded agent holds no key here. We can price the trade and we can
+  // decide it, but we cannot sign it — the owner's wallet has to. Returning a
+  // proposal rather than an error keeps the agent's decision visible and gives
+  // the client everything it needs to build the transaction itself.
+  if (creatorFunded) {
+    await recordAgentRun({
+      agentId: agent.id,
+      mint: agent.mint,
+      action: decision.action,
+      amount: decision.amount,
+      reason: decision.reason,
+      provenance: decision.provenance,
+      model: decision.model ?? null,
+      signature: null,
+      explorer: null,
+      error: null,
+    });
+    return NextResponse.json(
+      {
+        ok: true,
+        traded: false,
+        action: decision.action,
+        error: "creator_signature_required",
+        detail:
+          `This agent trades from ${agent.traderPubkey}, so only that wallet can ` +
+          "sign. Confirm the trade in your wallet to submit it.",
+        reason: decision.reason,
+        provenance: decision.provenance,
+        model: decision.model ?? null,
+        proposal: {
+          mint: agent.mint,
+          symbol: coin.symbol,
+          cluster: activeCluster(),
+          action: decision.action,
+          traderPublicKey: agent.traderPubkey,
+          curveAddress: curveAccount.address,
+          amount: quote.humanAmount,
+          amountIn: quote.amountIn.toString(),
+          expectedOut: quote.amountOut.toString(),
+          minOut: quote.minOut.toString(),
+          fee: quote.fee.toString(),
+          slippageBps: agent.slippageBps,
+          price: formatPrice(spotPriceScaled(curve), 12),
+          priceAfter: formatPrice(quote.priceAfter, 12),
+          submitTo: "/api/trade",
+        },
+      },
+      { status: 200 },
     );
   }
 

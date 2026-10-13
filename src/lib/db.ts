@@ -182,6 +182,31 @@ CREATE TABLE IF NOT EXISTS agent_runs (
 CREATE INDEX IF NOT EXISTS agent_runs_agent_idx ON agent_runs (agent_id, created_at DESC);
 `;
 
+/**
+ * Additive columns introduced after the tables above shipped. Kept separate so
+ * each one is an idempotent `ADD COLUMN IF NOT EXISTS` that cannot disturb
+ * existing rows. Never add a DROP or a type change here.
+ */
+const MIGRATIONS = `
+-- The agent's 3D body. Stores either a catalog id (e.g. 'xbot') or an absolute
+-- https GLB URL, so a generated body can be attached later without a shape change.
+ALTER TABLE trading_agents ADD COLUMN IF NOT EXISTS avatar_glb_url TEXT NOT NULL DEFAULT '';
+
+-- Headline the agent shows on its profile card.
+ALTER TABLE trading_agents ADD COLUMN IF NOT EXISTS tagline TEXT NOT NULL DEFAULT '';
+
+-- Who funds this agent's trading wallet: the creator's own wallet, or the
+-- platform launch wallet. Drives the profile badge and the funding path.
+ALTER TABLE trading_agents ADD COLUMN IF NOT EXISTS wallet_mode TEXT NOT NULL DEFAULT 'platform';
+
+-- The public key the agent trades from. Public only; no secret is stored here
+-- because every signature comes from the launch wallet or from the creator
+-- confirming in their own wallet.
+ALTER TABLE trading_agents ADD COLUMN IF NOT EXISTS trader_pubkey TEXT NOT NULL DEFAULT '';
+
+CREATE INDEX IF NOT EXISTS trading_agents_status_idx ON trading_agents (status, created_at DESC);
+`;
+
 /** Idempotent schema creation. Cached per instance; retried on failure. */
 export async function ensureSchema(): Promise<void> {
   if (!durable()) return;
@@ -190,6 +215,7 @@ export async function ensureSchema(): Promise<void> {
       const client = await getPool().connect();
       try {
         await client.query(SCHEMA);
+        await client.query(MIGRATIONS);
       } finally {
         client.release();
       }

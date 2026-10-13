@@ -670,6 +670,25 @@ export interface TradingAgentRecord {
   spentSol: number;
   realizedSol: number;
   createdAt: string;
+  /** Catalog id (`xbot`) or an absolute https GLB URL. */
+  avatarGlbUrl: string;
+  /** One-line headline shown on the profile card. */
+  tagline: string;
+  /** Who funds the agent's trading wallet. */
+  walletMode: AgentWalletMode;
+  /** Public key the agent trades from. Never a secret. */
+  traderPubkey: string;
+}
+
+/**
+ * `platform` — the agent trades from the server's launch wallet.
+ * `creator` — the agent trades from the creating user's own wallet, which the
+ * user must confirm in themselves; the server never holds that key.
+ */
+export type AgentWalletMode = "platform" | "creator";
+
+export function isAgentWalletMode(v: unknown): v is AgentWalletMode {
+  return v === "platform" || v === "creator";
 }
 
 /** One agent decision, recorded whether or not it resulted in a trade. */
@@ -701,6 +720,10 @@ interface AgentRow {
   spent_sol: string | null;
   realized_sol: string | null;
   created_at: Date | string;
+  avatar_glb_url: string | null;
+  tagline: string | null;
+  wallet_mode: string | null;
+  trader_pubkey: string | null;
 }
 
 interface AgentRunRow {
@@ -739,6 +762,10 @@ function rowToAgent(r: AgentRow): TradingAgentRecord {
     spentSol: num(r.spent_sol),
     realizedSol: num(r.realized_sol),
     createdAt: iso(r.created_at),
+    avatarGlbUrl: r.avatar_glb_url ?? "",
+    tagline: r.tagline ?? "",
+    walletMode: isAgentWalletMode(r.wallet_mode) ? r.wallet_mode : "platform",
+    traderPubkey: r.trader_pubkey ?? "",
   };
 }
 
@@ -778,8 +805,9 @@ export async function addAgent(agent: TradingAgentRecord): Promise<void> {
   await query(
     `INSERT INTO trading_agents (
        id, name, mint, prompt, budget_sol, max_trade_sol, slippage_bps,
-       api_key, status, spent_sol, realized_sol
-     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+       api_key, status, spent_sol, realized_sol,
+       avatar_glb_url, tagline, wallet_mode, trader_pubkey
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
     [
       agent.id,
       agent.name,
@@ -792,6 +820,10 @@ export async function addAgent(agent: TradingAgentRecord): Promise<void> {
       agent.status,
       agent.spentSol,
       agent.realizedSol,
+      agent.avatarGlbUrl,
+      agent.tagline,
+      agent.walletMode,
+      agent.traderPubkey,
     ],
   );
 }
@@ -819,6 +851,32 @@ export async function listAgents(mint?: string): Promise<TradingAgentRecord[]> {
 export async function setAgentStatus(id: string, status: string): Promise<void> {
   if (!durable()) return;
   await query("UPDATE trading_agents SET status = $2 WHERE id = $1", [id, status]);
+}
+
+/** Partial update for the profile-editable fields. Only supplied keys change. */
+export async function updateAgentProfile(
+  id: string,
+  patch: {
+    name?: string;
+    tagline?: string;
+    avatarGlbUrl?: string;
+    prompt?: string;
+  },
+): Promise<void> {
+  if (!durable()) return;
+  const sets: string[] = [];
+  const params: unknown[] = [id];
+  const add = (column: string, value: string | undefined) => {
+    if (value === undefined) return;
+    params.push(value);
+    sets.push(`${column} = $${params.length}`);
+  };
+  add("name", patch.name);
+  add("tagline", patch.tagline);
+  add("avatar_glb_url", patch.avatarGlbUrl);
+  add("prompt", patch.prompt);
+  if (!sets.length) return;
+  await query(`UPDATE trading_agents SET ${sets.join(", ")} WHERE id = $1`, params);
 }
 
 /**
