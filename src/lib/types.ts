@@ -58,6 +58,17 @@ export interface Coin {
   provenance?: Provenance;
   /** Where the artwork came from. */
   imageProvenance?: ImageProvenance;
+  /**
+   * The address of this coin's bonding-curve account. Absent for records made
+   * before curves existed, which is what makes them untradeable.
+   */
+  curveAddress?: string;
+  /** SOL committed at launch, which is the curve's opening reserve. */
+  initialBuySol?: number;
+  /** Mint authority, read back from chain after the mint landed. */
+  mintAuthority?: string;
+  /** Token program that owns the mint (classic Token or Token-2022). */
+  tokenProgram?: string;
 }
 
 /** Solana clusters this app can target. */

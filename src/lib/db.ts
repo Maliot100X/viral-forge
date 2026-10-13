@@ -84,6 +84,33 @@ ALTER TABLE coins ADD COLUMN IF NOT EXISTS cluster          TEXT;
 ALTER TABLE coins ADD COLUMN IF NOT EXISTS provenance       TEXT;
 ALTER TABLE coins ADD COLUMN IF NOT EXISTS image_provenance TEXT;
 
+-- Curve and trading columns. curve_secret holds the curve account's keypair
+-- so it can co-sign its own payouts; without it a sell can never be authorized.
+ALTER TABLE coins ADD COLUMN IF NOT EXISTS curve_address   TEXT;
+ALTER TABLE coins ADD COLUMN IF NOT EXISTS curve_secret    TEXT;
+ALTER TABLE coins ADD COLUMN IF NOT EXISTS initial_buy_sol NUMERIC DEFAULT 0;
+ALTER TABLE coins ADD COLUMN IF NOT EXISTS mint_authority  TEXT;
+ALTER TABLE coins ADD COLUMN IF NOT EXISTS token_program   TEXT;
+
+-- Every trade this site has executed, so the curve's history is auditable and
+-- the reserve can be reconciled against real transfers rather than asserted.
+CREATE TABLE IF NOT EXISTS trades (
+  id            BIGSERIAL PRIMARY KEY,
+  mint          TEXT NOT NULL,
+  action        TEXT NOT NULL,
+  signature     TEXT NOT NULL,
+  wallet        TEXT NOT NULL DEFAULT '',
+  sol_lamports  NUMERIC NOT NULL DEFAULT 0,
+  token_atoms   NUMERIC NOT NULL DEFAULT 0,
+  fee_lamports  NUMERIC NOT NULL DEFAULT 0,
+  price_scaled  NUMERIC NOT NULL DEFAULT 0,
+  cluster       TEXT,
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS trades_mint_idx ON trades (mint, created_at DESC);
+CREATE INDEX IF NOT EXISTS trades_signature_idx ON trades (signature);
+
 CREATE INDEX IF NOT EXISTS coins_created_at_idx ON coins (created_at DESC);
 CREATE INDEX IF NOT EXISTS coins_status_idx ON coins (status);
 

@@ -57,6 +57,36 @@ export function persistence(): "postgres" | "memory" {
 // never masks a configured-but-broken database.
 const memory: { coins: Coin[] } = { coins: [] };
 
+/**
+ * Curve secrets, held apart from the `Coin` shape on purpose.
+ *
+ * A coin object is serialised straight to the browser by /api/coins and every
+ * page that reads it. The curve account's private key can authorise SOL payouts
+ * out of the reserve, so it must never be reachable from anything the client
+ * receives. It goes in through `rememberCurveSecret`, is written to Postgres by
+ * `addCoin`, and is read back only by the server-side trade route.
+ */
+const curveSecrets = new Map<string, string>();
+
+/** Records the curve keypair for a mint so `addCoin` can persist it. */
+export function rememberCurveSecret(mint: string, secret: string): void {
+  curveSecrets.set(mint, secret);
+}
+
+/** The stored base58 curve secret for a mint, or null when it has no curve. */
+export async function getCurveSecret(mint: string): Promise<string | null> {
+  const cached = curveSecrets.get(mint);
+  if (cached) return cached;
+  if (!durable()) return null;
+  const rows = await query<{ curve_secret: string | null }>(
+    "SELECT curve_secret FROM coins WHERE mint = $1 LIMIT 1",
+    [mint],
+  );
+  const secret = rows[0]?.curve_secret ?? null;
+  if (secret) curveSecrets.set(mint, secret);
+  return secret;
+}
+
 // --- row mapping ------------------------------------------------------------
 
 // The table's `status` column is the record's launch state. Only an actually
@@ -86,6 +116,11 @@ interface CoinRow {
   cluster: string | null;
   provenance: string | null;
   image_provenance: string | null;
+  curve_address: string | null;
+  curve_secret: string | null;
+  initial_buy_sol: string | null;
+  mint_authority: string | null;
+  token_program: string | null;
 }
 
 function iso(v: Date | string): string {
@@ -118,6 +153,10 @@ function rowToCoin(r: CoinRow): Coin {
     cluster: (r.cluster as Coin["cluster"]) ?? undefined,
     provenance: (r.provenance as Coin["provenance"]) ?? undefined,
     imageProvenance: (r.image_provenance as Coin["imageProvenance"]) ?? undefined,
+    curveAddress: r.curve_address ?? undefined,
+    initialBuySol: r.initial_buy_sol ? Number(r.initial_buy_sol) : undefined,
+    mintAuthority: r.mint_authority ?? undefined,
+    tokenProgram: r.token_program ?? undefined,
   };
 }
 
@@ -167,9 +206,11 @@ export async function addCoin(coin: Coin): Promise<Coin> {
     `INSERT INTO coins (
        mint, name, ticker, description, tags, logo_style, logo_url, source,
        status, create_sig, explorer, created_at, image_prompt, vibe,
-       source_ref, launched_by, pump_url, cluster, provenance, image_provenance
+       source_ref, launched_by, pump_url, cluster, provenance, image_provenance,
+       curve_address, curve_secret, initial_buy_sol, mint_authority, token_program
      ) VALUES (
-       $1,$2,$3,$4,$5,$6,$7,$8,'SIM',NULL,NULL,$9,$10,$11,$12,$13,$14,$15,$16,$17
+       $1,$2,$3,$4,$5,$6,$7,$8,'SIM',NULL,NULL,$9,$10,$11,$12,$13,$14,$15,$16,$17,
+       $18,$19,$20,$21,$22
      )
      ON CONFLICT (mint) DO UPDATE SET
        name = EXCLUDED.name,
@@ -185,7 +226,12 @@ export async function addCoin(coin: Coin): Promise<Coin> {
        launched_by = EXCLUDED.launched_by,
        pump_url = EXCLUDED.pump_url,
        provenance = EXCLUDED.provenance,
-       image_provenance = EXCLUDED.image_provenance`,
+       image_provenance = EXCLUDED.image_provenance,
+       curve_address = COALESCE(EXCLUDED.curve_address, coins.curve_address),
+       curve_secret = COALESCE(EXCLUDED.curve_secret, coins.curve_secret),
+       initial_buy_sol = COALESCE(EXCLUDED.initial_buy_sol, coins.initial_buy_sol),
+       mint_authority = COALESCE(EXCLUDED.mint_authority, coins.mint_authority),
+       token_program = COALESCE(EXCLUDED.token_program, coins.token_program)`,
     [
       coin.mint,
       coin.name,
@@ -204,6 +250,11 @@ export async function addCoin(coin: Coin): Promise<Coin> {
       coin.cluster ?? null,
       coin.provenance ?? null,
       coin.imageProvenance ?? null,
+      coin.curveAddress ?? null,
+      curveSecrets.get(coin.mint) ?? null,
+      coin.initialBuySol ?? null,
+      coin.mintAuthority ?? null,
+      coin.tokenProgram ?? null,
     ],
   );
   return coin;
@@ -420,4 +471,86 @@ export async function logRadar(
        SELECT id FROM radar_log ORDER BY id DESC LIMIT 200
      )`,
   );
+}
+
+// --- trades -----------------------------------------------------------------
+
+/** A single executed buy or sell, recorded only after its transaction landed. */
+export interface TradeRecord {
+  id: number;
+  mint: string;
+  action: "buy" | "sell";
+  signature: string;
+  wallet: string;
+  solLamports: string;
+  tokenAtoms: string;
+  feeLamports: string;
+  priceScaled: string;
+  cluster: string;
+  createdAt: string;
+}
+
+interface TradeRow {
+  id: number;
+  mint: string;
+  action: string;
+  signature: string;
+  wallet: string | null;
+  sol_lamports: string | null;
+  token_atoms: string | null;
+  fee_lamports: string | null;
+  price_scaled: string | null;
+  cluster: string | null;
+  created_at: Date | string;
+}
+
+/**
+ * Persists a trade that already confirmed on chain.
+ *
+ * BigInt values are passed as strings: they exceed what a JS number can hold,
+ * and pg would otherwise round them through a float on the way in.
+ */
+export async function recordTrade(
+  trade: Omit<TradeRecord, "id" | "createdAt">,
+): Promise<void> {
+  if (!durable()) return;
+  await query(
+    `INSERT INTO trades (
+       mint, action, signature, wallet, sol_lamports, token_atoms,
+       fee_lamports, price_scaled, cluster
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+    [
+      trade.mint,
+      trade.action,
+      trade.signature,
+      trade.wallet,
+      trade.solLamports,
+      trade.tokenAtoms,
+      trade.feeLamports,
+      trade.priceScaled,
+      trade.cluster,
+    ],
+  );
+}
+
+/** Trades for one mint, newest first. */
+export async function listTrades(mint: string, limit = 50): Promise<TradeRecord[]> {
+  if (!durable()) return [];
+  const rows = await query<TradeRow>(
+    `SELECT * FROM trades WHERE mint = $1 ORDER BY id DESC LIMIT $2`,
+    [mint, limit],
+  );
+  return rows.map((r) => ({
+    id: r.id,
+    mint: r.mint,
+    action: r.action === "sell" ? "sell" : "buy",
+    signature: r.signature,
+    wallet: r.wallet ?? "",
+    solLamports: r.sol_lamports ?? "0",
+    tokenAtoms: r.token_atoms ?? "0",
+    feeLamports: r.fee_lamports ?? "0",
+    priceScaled: r.price_scaled ?? "0",
+    cluster: r.cluster ?? "",
+    createdAt: iso(r.created_at),
+  }));
 }

@@ -139,6 +139,15 @@ export function feeOn(amountIn: bigint): bigint {
 export const FEE_MIN_AMOUNT = 10_000n / FEE_BPS;
 
 /**
+ * Flat fee the creation service charges to mint a token, in lamports.
+ *
+ * Read from https://pumpdev.io/api/health, which reports a commission rate of
+ * 0.0025. It is declared here so the launch screen can show a real total before
+ * the user confirms, rather than discovering the cost afterwards.
+ */
+export const FORGE_FEE_LAMPORTS = 2_500_000n;
+
+/**
  * Price of one whole token right now, in lamports, scaled by 1e9.
  *
  * WARNING: this scale has too little resolution to be used as a price or to
