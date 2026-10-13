@@ -41,6 +41,22 @@ import { getCoin, getCurveSecret, listTrades, recordTrade } from "@/lib/store";
 //
 // As with /api/launch, nothing is signed unless `confirm` is explicitly true.
 
+// A CurveState carries two bigints, and `NextResponse.json` calls
+// JSON.stringify, which throws `TypeError: Do not know how to serialize a
+// BigInt`. Returning the raw state made GET /api/trade a 500 on the deployed
+// site - and that is the read the sell presets depend on. Every response that
+// embeds a curve goes through here; the reserve in SOL is what a UI wants.
+function wireCurve(curve: { realSolReserve: bigint; tokenReserve: bigint }) {
+  return {
+    realSolReserve: curve.realSolReserve.toString(),
+    tokenReserve: curve.tokenReserve.toString(),
+    reserveSol: Number(curve.realSolReserve) / 1e9,
+    tokensOnCurve: curve.tokenReserve.toString(),
+    price: formatPrice(spotPriceScaled(curve), 12),
+    marketCapLamports: marketCapLamports(curve).toString(),
+  };
+}
+
 const Body = z.object({
   mint: z.string().min(32).max(44),
   action: z.enum(["buy", "sell"]),
@@ -156,9 +172,7 @@ export async function GET(req: Request) {
     return NextResponse.json({
       mint,
       cluster: activeCluster(),
-      curve,
-      marketCapLamports: marketCapLamports(curve).toString(),
-      price: formatPrice(spotPriceScaled(curve), 12),
+      curve: wireCurve(curve),
       holdings,
       trades,
       wallet: walletAddress(),
@@ -175,7 +189,7 @@ export async function GET(req: Request) {
     action,
     cluster: activeCluster(),
     amount,
-    curve,
+    curve: wireCurve(curve),
     quote: {
       amountIn: quote.amountIn.toString(),
       amountOut: quote.amountOut.toString(),
@@ -387,7 +401,7 @@ export async function POST(req: Request) {
         traderIsConnectedWallet,
         traderTokenBalance: result.traderTokenBalance,
         curveTokenBalance: result.curveTokenBalance,
-        curve: result.curve,
+        curve: wireCurve(result.curve),
       },
       { status: 201 },
     );
