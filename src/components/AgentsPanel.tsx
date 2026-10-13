@@ -3,6 +3,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useToast } from "./Toasts";
+import { useWallet, shortAddress } from "@/lib/wallet";
+import {
+  AVATAR_BODIES,
+  DEFAULT_AVATAR_ID,
+  avatarById,
+} from "./avatar/avatar-catalog";
 
 /**
  * AgentsPanel — create and run trading agents against a real bonding curve.
@@ -27,6 +33,10 @@ interface Agent {
   realizedSol: number;
   createdAt: string;
   hasApiKey: boolean;
+  avatarGlbUrl: string;
+  tagline: string;
+  walletMode: "platform" | "creator";
+  traderPubkey: string;
 }
 
 interface TradeableCoin {
@@ -120,7 +130,17 @@ export default function AgentsPanel({
   const [maxTradeSol, setMaxTradeSol] = useState(0.05);
   const [slippageBps, setSlippageBps] = useState(300);
   const [apiKey, setApiKey] = useState("");
+  const [tagline, setTagline] = useState("");
+  const [avatar, setAvatar] = useState<string>(DEFAULT_AVATAR_ID);
+  const [walletMode, setWalletMode] = useState<"platform" | "creator">("platform");
   const [creating, setCreating] = useState(false);
+
+  // A creator-wallet agent is funded and priced against the connected wallet.
+  // The server never receives a secret for it: it can only propose, and the
+  // owner signs the proposal in their own wallet.
+  const connected = useWallet();
+  const creatorPubkey = connected.address ?? "";
+  const creatorBlocked = walletMode === "creator" && !creatorPubkey;
 
   const [busyId, setBusyId] = useState<string | null>(null);
   const [quoteFor, setQuoteFor] = useState<{ agent: Agent; quote: Quote; action: string; reason: string; provenance: string } | null>(null);
@@ -176,6 +196,10 @@ export default function AgentsPanel({
           budgetSol,
           maxTradeSol,
           slippageBps,
+          tagline: tagline.trim(),
+          avatar,
+          walletMode,
+          ...(walletMode === "creator" ? { traderPublicKey: creatorPubkey } : {}),
           ...(apiKey.trim() ? { apiKey: apiKey.trim() } : {}),
         }),
       });
@@ -188,13 +212,28 @@ export default function AgentsPanel({
       setName("");
       setPrompt("");
       setApiKey("");
+      setTagline("");
       await refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : "request failed");
     } finally {
       setCreating(false);
     }
-  }, [apiKey, budgetSol, maxTradeSol, mint, name, prompt, push, refresh, slippageBps]);
+  }, [
+    apiKey,
+    avatar,
+    budgetSol,
+    creatorPubkey,
+    maxTradeSol,
+    mint,
+    name,
+    prompt,
+    push,
+    refresh,
+    slippageBps,
+    tagline,
+    walletMode,
+  ]);
 
   const run = useCallback(
     async (agent: Agent, confirm: boolean) => {
@@ -284,11 +323,22 @@ export default function AgentsPanel({
             </label>
 
             <label className="mt-3 block">
+              <span className="label">tagline · shown on the profile</span>
+              <input
+                className="input mt-1"
+                value={tagline}
+                maxLength={140}
+                placeholder="accumulates early, exits into strength"
+                onChange={(e) => setTagline(e.target.value)}
+              />
+            </label>
+
+            <label className="mt-3 block">
               <span className="label">coin to trade</span>
               <select className="select mt-1" value={mint} onChange={(e) => setMint(e.target.value)}>
                 {coins.map((c) => (
                   <option key={c.mint} value={c.mint}>
-                    ${c.symbol} — {c.name}
+                    {c.symbol} — {c.name}
                   </option>
                 ))}
               </select>
@@ -369,10 +419,69 @@ export default function AgentsPanel({
               </span>
             </label>
 
+            <div className="mt-3">
+              <span className="label">who funds the trades</span>
+              <div className="mt-1 flex flex-wrap gap-1.5">
+                <button
+                  type="button"
+                  className={`tab ${walletMode === "platform" ? "tab-active" : ""}`}
+                  onClick={() => setWalletMode("platform")}
+                >
+                  platform wallet
+                </button>
+                <button
+                  type="button"
+                  className={`tab ${walletMode === "creator" ? "tab-active" : ""}`}
+                  onClick={() => setWalletMode("creator")}
+                >
+                  my wallet
+                </button>
+              </div>
+              {walletMode === "platform" ? (
+                <span className="mono mt-1 block text-[10px] text-fg-faint">
+                  The site wallet holds the SOL and signs. The agent trades on its own.
+                </span>
+              ) : creatorPubkey ? (
+                <span className="mono mt-1 block text-[10px] text-fg-faint">
+                  Funded by {shortAddress(creatorPubkey)}. The server stores only this public key,
+                  so the agent can price and propose but never sign — you confirm every trade in
+                  your own wallet.
+                </span>
+              ) : (
+                <span className="mono mt-1 block text-[10px] text-[var(--danger)]">
+                  Connect a wallet first — a creator-funded agent needs your public key to price
+                  against your balance.
+                </span>
+              )}
+            </div>
+
+            <div className="mt-3">
+              <div className="flex items-center justify-between">
+                <span className="label">body</span>
+                <span className="mono text-[10px] text-fg-dim">{avatarById(avatar).label}</span>
+              </div>
+              <div className="mt-1 flex flex-wrap gap-1.5">
+                {AVATAR_BODIES.map((b) => (
+                  <button
+                    key={b.id}
+                    type="button"
+                    className={`tab ${avatar === b.id ? "tab-active" : ""}`}
+                    title={b.tags.join(" · ")}
+                    onClick={() => setAvatar(b.id)}
+                  >
+                    {b.label}
+                  </button>
+                ))}
+              </div>
+              <span className="mono mt-1 block text-[10px] text-fg-faint">
+                Rendered live in the agent&apos;s 3D profile from the three.ws CDN.
+              </span>
+            </div>
+
             <button
               type="button"
               className="btn btn-primary mt-4"
-              disabled={creating || !mint}
+              disabled={creating || !mint || creatorBlocked}
               onClick={() => void create()}
             >
               {creating ? "creating…" : "create agent"}
@@ -402,9 +511,21 @@ export default function AgentsPanel({
             <div key={a.id} className="card p-5">
               <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
                 <div>
-                  <p className="mono text-sm text-fg">{a.name}</p>
+                  <Link
+                    href={`/agents/${a.id}`}
+                    className="mono text-sm text-fg hover:text-accent hover:underline"
+                  >
+                    {a.name}
+                  </Link>{" "}
+                  <span className={a.walletMode === "creator" ? "pill pill-sim" : "pill"}>
+                    {a.walletMode === "creator" ? "creator-funded" : "platform-funded"}
+                  </span>
+                  {a.tagline && (
+                    <p className="mono text-[10px] text-fg-dim">{a.tagline}</p>
+                  )}
                   <p className="mono text-[10px] text-fg-faint">
-                    {coin ? `$${coin.symbol}` : short(a.mint)} ·{" "}
+                    {coin ? coin.symbol : short(a.mint)} ·{" "}
+                    {a.walletMode === "creator" ? "creator wallet" : "platform wallet"} ·{" "}
                     {a.hasApiKey ? "own brain key" : "site brain"} · {a.status}
                   </p>
                 </div>
@@ -441,15 +562,19 @@ export default function AgentsPanel({
               </dl>
 
               <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1">
-                <Link href={`/coin/${a.mint}`} className="mono text-[11px] text-accent hover:underline">
-                  open coin →
+                <Link
+                  href={`/agents/${a.id}`}
+                  className="mono text-[11px] text-accent hover:underline"
+                >
+                  open profile →
                 </Link>
-                <a
+                <Link
                   href={`/coin/${a.mint}`}
                   className="mono text-[11px] text-fg-faint hover:text-accent"
                 >
-                  id {a.id}
-                </a>
+                  open coin →
+                </Link>
+                <span className="mono text-[11px] text-fg-faint">id {a.id}</span>
               </div>
 
               {/* quote awaiting confirmation for this agent */}

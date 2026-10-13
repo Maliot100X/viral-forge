@@ -48,7 +48,7 @@ export async function generateMetadata({
   const coin = await getCoin(mint);
   if (!coin) return { title: "Coin not found · VIRAL.forge" };
   return {
-    title: `$${coin.symbol} ${coin.name} · VIRAL.forge`,
+    title: `${coin.symbol} ${coin.name} · VIRAL.forge`,
     description: coin.description.split("\n")[0],
   };
 }
@@ -68,7 +68,7 @@ export default async function CoinPage({
   const tradeable = Boolean(market?.exists);
 
   const shareText = encodeURIComponent(
-    `$${coin.symbol} — ${coin.name}\n${coin.description.split("\n")[0]}\n\n${
+    `${coin.symbol} — ${coin.name}\n${coin.description.split("\n")[0]}\n\n${
       market ? `market cap ${fmtSol(market.marketCapSol, 2)} SOL · ` : ""
     }bonding curve on ${coin.cluster ?? "devnet"}\n\nForged with VIRAL.forge`,
   );
@@ -84,7 +84,7 @@ export default async function CoinPage({
           launched
         </Link>
         {" / "}
-        <span className="text-fg-dim">${coin.symbol}</span>
+        <span className="text-fg-dim">{coin.symbol}</span>
       </p>
 
       {/* Two-column reference layout: hero + facts on the left, the market and
@@ -103,7 +103,7 @@ export default async function CoinPage({
               style={{ imageRendering: "pixelated" }}
             />
 
-            <p className="mono mt-4 text-sm text-accent">${coin.symbol}</p>
+            <p className="mono mt-4 text-sm text-accent">{coin.symbol}</p>
             <h1 className="mono mt-1 text-2xl sm:text-3xl">{coin.name}</h1>
 
             <span className={`pill mt-3 inline-block ${live ? "pill-live" : "pill-sim"}`}>

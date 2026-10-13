@@ -151,7 +151,7 @@ export default function ProcessCompanion() {
     if (lastPhase.current === phase) return;
     lastPhase.current = phase;
     if (phase === "launched" && launchedSymbol) {
-      push(`$${launchedSymbol} recorded`, "ok");
+      push(`${launchedSymbol} recorded`, "ok");
     }
   }, [phase, launchedSymbol, push]);
 
@@ -242,7 +242,7 @@ export default function ProcessCompanion() {
 
           {phase === "launched" && launchedSymbol && (
             <p className="mono mt-2 text-[11px] text-accent">
-              recorded ${launchedSymbol}
+              recorded {launchedSymbol}
             </p>
           )}
 

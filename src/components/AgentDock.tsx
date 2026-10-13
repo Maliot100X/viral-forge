@@ -267,10 +267,10 @@ export default function AgentDock() {
         process.advance("logo", action.input);
         await wait(delay);
         process.succeed();
-        patch(id, { busy: false, text: `Made ${gen.name} ($${gen.symbol}).`, gen });
+        patch(id, { busy: false, text: `Made ${gen.name} (${gen.symbol}).`, gen });
 
         if (action.type === "forge") {
-          push(`Forged $${gen.symbol}`, "ok");
+          push(`Forged ${gen.symbol}`, "ok");
           return;
         }
 
@@ -318,12 +318,12 @@ export default function AgentDock() {
         append({
           role: "assistant",
           text: coin.txSignature
-            ? `$${coin.symbol} is on ${coin.cluster}. Transaction submitted — verify it on the explorer below.`
-            : `$${coin.symbol} was recorded locally. No transaction was broadcast.`,
+            ? `${coin.symbol} is on ${coin.cluster}. Transaction submitted — verify it on the explorer below.`
+            : `${coin.symbol} was recorded locally. No transaction was broadcast.`,
         });
         process.markLaunched(coin.symbol);
         push(
-          coin.txSignature ? `$${coin.symbol} submitted to devnet` : `$${coin.symbol} recorded`,
+          coin.txSignature ? `${coin.symbol} submitted to devnet` : `${coin.symbol} recorded`,
           "ok",
         );
       } catch (e) {
@@ -601,7 +601,7 @@ function ForgeCard({ gen }: { gen: GenerateResult }) {
         />
         <div className="min-w-0">
           <p className="mono text-[11px] text-fg">
-            {gen.name} <span className="text-accent">${gen.symbol}</span>
+            {gen.name} <span className="text-accent">{gen.symbol}</span>
           </p>
           <p className="mt-1 text-[11px] leading-snug text-fg-dim">{gen.description}</p>
           <p className="mono mt-1 text-[9px] text-fg-faint">

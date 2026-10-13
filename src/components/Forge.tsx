@@ -159,7 +159,7 @@ export default function Forge() {
       setGen(data);
       setDraft(data);
       process.succeed();
-      push(`Forged $${data.symbol}`, "ok");
+      push(`Forged ${data.symbol}`, "ok");
     } catch (e) {
       process.fail((e as Error).message);
       push((e as Error).message, "err");
@@ -234,7 +234,7 @@ export default function Forge() {
       setCoin(data.coin);
       setPending(null);
       process.markLaunched(data.coin.symbol);
-      push(`$${data.coin.symbol} launched on devnet`, "ok");
+      push(`${data.coin.symbol} launched on devnet`, "ok");
     } catch (e) {
       process.fail((e as Error).message);
       push((e as Error).message, "err");

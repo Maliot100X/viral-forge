@@ -58,7 +58,16 @@ describe("store", () => {
     await s.addCoin(coin());
     const coins = await s.listCoins();
     expect(coins).toHaveLength(1);
-    expect(coins[0].symbol).toBe("TEST");
+    // A ticker always reads back with its sigil, so every render site can show
+    // `symbol` verbatim instead of each remembering to prepend one.
+    expect(coins[0].symbol).toBe("$TEST");
+  });
+
+  it("does not double the sigil on an already-sigiled ticker", async () => {
+    const s = await freshStore();
+    await s.addCoin(coin({ symbol: "$TEST" }));
+    const coins = await s.listCoins();
+    expect(coins[0].symbol).toBe("$TEST");
   });
 
   it("finds a coin by mint or by id", async () => {

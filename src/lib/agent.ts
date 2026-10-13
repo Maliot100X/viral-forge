@@ -282,7 +282,7 @@ export async function runAgentForge(
   const coin = await forge(source, input, style);
   return {
     action: "forge",
-    reply: `Made ${coin.name} ($${coin.symbol}).`,
+    reply: `Made ${coin.name} (${coin.symbol}).`,
     coin,
   };
 }

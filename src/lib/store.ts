@@ -142,7 +142,7 @@ function rowToCoin(r: CoinRow): Coin {
     // row-scoped id so they stay addressable instead of colliding on "".
     id: r.mint ?? `row_${r.id}`,
     name: r.name,
-    symbol: r.ticker ?? "",
+    symbol: r.ticker ? withSigil(r.ticker) : "",
     description: r.description ?? "",
     imageUrl: r.logo_url ?? "",
     imagePrompt: r.image_prompt ?? "",
@@ -172,6 +172,11 @@ function rowToCoin(r: CoinRow): Coin {
 
 function sortNewestFirst(a: Coin, b: Coin): number {
   return b.createdAt.localeCompare(a.createdAt);
+}
+
+/** Tickers are displayed with a leading `$` and stored with it. */
+function withSigil(symbol: string): string {
+  return symbol.startsWith("$") ? symbol : `$${symbol}`;
 }
 
 /**
@@ -234,7 +239,7 @@ export async function getCoin(mint: string): Promise<Coin | null> {
 
 export async function addCoin(coin: Coin): Promise<Coin> {
   if (!durable()) {
-    const next = normalizeCoin(coin);
+    const next = normalizeCoin({ ...coin, symbol: withSigil(coin.symbol) });
     memory.coins = [next, ...memory.coins.filter((c) => c.mint !== coin.mint)];
     return next;
   }
@@ -273,7 +278,10 @@ export async function addCoin(coin: Coin): Promise<Coin> {
     [
       coin.mint,
       coin.name,
-      coin.symbol,
+      // The DB stores the ticker with its sigil already attached ("$CHIGE"),
+      // while callers of the in-memory path pass a bare one. Normalise on the
+      // single write boundary so a read is always displayable as-is.
+      withSigil(coin.symbol),
       coin.description,
       coin.tags ?? [],
       coin.imageStyle,

@@ -69,7 +69,7 @@ export default function CoinCard({
         </div>
 
         <p className="mono mt-0.5 text-[11px] text-fg-faint">
-          ${coin.symbol} · {coin.source} · {coin.launchedBy} · {age(coin.createdAt)}
+          {coin.symbol} · {coin.source} · {coin.launchedBy} · {age(coin.createdAt)}
           {coin.cluster ? ` · ${coin.cluster}` : ""}
         </p>
 

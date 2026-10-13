@@ -115,7 +115,7 @@ export async function POST(req: Request) {
     const engineNote = engines.length ? ` · ${engines.join("/")} brain` : "";
     const summary = created.length
       ? `Scan ${state.ticks + 1}: ${trends.length} trends · forged ${created
-          .map((c) => `$${c.symbol}`)
+          .map((c) => c.symbol)
           .join(", ")}${engineNote}`
       : `Scan ${state.ticks + 1}: ${trends.length} trends · nothing above min heat ${state.settings.minScore}`;
 
