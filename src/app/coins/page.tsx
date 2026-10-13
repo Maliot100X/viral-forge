@@ -2,6 +2,7 @@ import CoinCard from "@/components/CoinCard";
 import Link from "next/link";
 import { connection } from "next/server";
 import { listCoins } from "@/lib/store";
+import { readMarkets } from "@/lib/market";
 
 export const instant = false;
 
@@ -28,6 +29,11 @@ export default async function CoinsPage({
 
   await connection();
   const [coins, all] = await Promise.all([listCoins(filter), listCoins()]);
+
+  // One curve read per tradeable coin, so the list shows the same real price,
+  // reserve and graduation the coin page shows. A coin whose read fails is
+  // absent from the map and renders "market unavailable" — never a zero.
+  const markets = await readMarkets(coins);
 
   const counts: Record<string, number> = {
     all: all.length,
@@ -57,7 +63,7 @@ export default async function CoinsPage({
 
       <div className="mt-5 grid gap-3 md:grid-cols-2">
         {coins.map((c) => (
-          <CoinCard key={c.id} coin={c} />
+          <CoinCard key={c.id} coin={c} market={c.mint ? markets.get(c.mint) ?? null : null} />
         ))}
       </div>
 

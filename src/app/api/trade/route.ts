@@ -150,6 +150,9 @@ export async function GET(req: Request) {
   // A read that fails is reported as null, never as zero — "we could not check"
   // and "you hold nothing" are different answers and only one is safe to show.
   let holdings: { owner: string; amount: string } | null = null;
+  // The holder's own SOL balance, so the UI can tell an empty devnet wallet that
+  // it can still buy (the launch wallet pays) instead of leaving it guessing.
+  let walletLamports: number | null = null;
   if (holder) {
     try {
       const owner = new PublicKey(holder);
@@ -159,8 +162,13 @@ export async function GET(req: Request) {
         true,
         TOKEN_PROGRAM_ID,
       );
-      const amount = await tokenBalance(connection(), ownerAta);
+      const conn = connection();
+      const [amount, lamports] = await Promise.all([
+        tokenBalance(conn, ownerAta),
+        conn.getBalance(owner).catch(() => null),
+      ]);
       holdings = { owner: owner.toBase58(), amount: amount.toString() };
+      walletLamports = lamports;
     } catch {
       holdings = null;
     }
@@ -174,6 +182,7 @@ export async function GET(req: Request) {
       cluster: activeCluster(),
       curve: wireCurve(curve),
       holdings,
+      walletLamports,
       trades,
       wallet: walletAddress(),
     });
@@ -198,6 +207,7 @@ export async function GET(req: Request) {
       priceAfterLabel: formatPrice(quote.priceAfter, 12),
     },
     holdings,
+    walletLamports,
     price: formatPrice(spotPriceScaled(curve), 12),
     trades,
     wallet: walletAddress(),
@@ -326,24 +336,16 @@ export async function POST(req: Request) {
   // while the launch wallet funds and pays. Saying so is better than implying
   // the extension signed something; it did not, and it cannot, because its key
   // never leaves the browser.
-  if (traderIsConnectedWallet && trader && b.action === "buy") {
-    const conn = connection();
-    const live = await conn.getBalance(trader).catch(() => null);
-    if (live !== null && live < 5_000) {
-      // Not fatal to the mechanics, but the honest thing is to say the
-      // connected wallet is not the payer before anything jumps out of it.
-      return NextResponse.json(
-        {
-          error: "invalid_trader",
-          detail:
-            "That wallet has no SOL. The launch wallet pays for the buy, and the tokens " +
-            "are delivered to the connected wallet — so it does not need SOL, but sending " +
-            "SOL to it would let you trade with your own funds.",
-        },
-        { status: 409 },
-      );
-    }
-  }
+  //
+  // This used to reject any connected wallet holding under 5_000 lamports, which
+  // locked out every fresh devnet wallet — precisely the users this site is for.
+  // The connected wallet is not the fee payer, so its balance is irrelevant to
+  // whether the buy can settle; it is reported back to the caller instead.
+  const traderBalanceLamports = trader
+    ? await connection()
+        .getBalance(trader)
+        .catch(() => null)
+    : null;
 
   try {
     const result =
@@ -399,6 +401,15 @@ export async function POST(req: Request) {
         trader: trader?.toBase58() ?? wallet?.publicKey.toBase58() ?? null,
         /** True when the tokens went to a wallet other than the launch wallet. */
         traderIsConnectedWallet,
+        /**
+         * The connected wallet's own SOL balance at trade time, or null when it
+         * could not be read. The launch wallet pays, so this never gates a fill —
+         * it is surfaced so the UI can tell a user their wallet is empty and let
+         * them fund it to trade with their own funds.
+         */
+        traderBalanceLamports: traderBalanceLamports === null ? null : String(traderBalanceLamports),
+        /** True when the connected wallet pays nothing and the launch wallet funds the buy. */
+        fundedBy: traderIsConnectedWallet ? "launch_wallet" : "trader",
         traderTokenBalance: result.traderTokenBalance,
         curveTokenBalance: result.curveTokenBalance,
         curve: wireCurve(result.curve),

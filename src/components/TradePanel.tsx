@@ -48,6 +48,10 @@ interface Fill {
   reserveSol: number;
   traderTokenBalance: string;
   traderIsConnectedWallet: boolean;
+  /** The connected wallet's own SOL, or null when it could not be read. */
+  traderBalanceLamports?: string | null;
+  /** "launch_wallet" when this site funded the buy on the user's behalf. */
+  fundedBy?: "launch_wallet" | "trader";
 }
 
 interface MarketCurve {
@@ -121,6 +125,7 @@ export default function TradePanel({
   const [holdingsRead, setHoldingsRead] = useState<{
     key: string;
     amount: number | null;
+    walletLamports?: number | null;
   } | null>(null);
   const holdingsKey = address ? `${address}:${mint}` : null;
   const heldTokens = holdingsKey && holdingsRead?.key === holdingsKey ? holdingsRead.amount : null;
@@ -138,9 +143,16 @@ export default function TradePanel({
         setHoldingsRead({ key, amount: null });
         return;
       }
-      const data = (await res.json()) as { holdings?: { amount?: string } };
+      const data = (await res.json()) as {
+        holdings?: { amount?: string };
+        walletLamports?: number | null;
+      };
       const raw = data.holdings?.amount;
-      setHoldingsRead({ key, amount: raw === undefined ? null : fromAtoms(raw) });
+      setHoldingsRead({
+        key,
+        amount: raw === undefined ? null : fromAtoms(raw),
+        walletLamports: data.walletLamports ?? null,
+      });
     } catch {
       setHoldingsRead({ key, amount: null });
     }
@@ -216,11 +228,18 @@ export default function TradePanel({
   const parsedAmount = Number(amount);
   const amountOk = Number.isFinite(parsedAmount) && parsedAmount > 0;
 
+  // A connected wallet with no SOL can still buy: the launch wallet is the fee
+  // payer and the connected wallet only receives tokens. Say so plainly instead
+  // of letting the user assume their empty wallet is the blocker — that wrong
+  // assumption is what made this look broken.
+  const walletSol = holdingsRead?.walletLamports ?? null;
+  const walletEmpty = address !== null && walletSol !== null && walletSol < 5_000;
+
   const sellAmount = (pct: number): number =>
     heldTokens === null ? 0 : Math.floor(heldTokens * (pct / 100) * 1e6) / 1e6;
 
   return (
-    <div className="card border-l-2 border-l-[var(--violet)] p-4">
+    <div id="trade" className="card border-l-2 border-l-[var(--violet)] p-4">
       <div className="mb-3 flex items-center justify-between">
         <p className="label">
           trade · {address ? "signs with the launch wallet" : "connect a wallet to trade"}
@@ -382,6 +401,9 @@ export default function TradePanel({
           </dl>
           <p className="mono mt-2 text-[10px] text-fg-faint">
             This submits a real transaction on {quote.cluster}. Nothing has been signed yet.
+            {address
+              ? " Your wallet receives the tokens; this site's launch wallet pays, so you do not need SOL to buy."
+              : " With no wallet connected the launch wallet trades both sides."}
           </p>
           <div className="mt-3 flex gap-2">
             <button
@@ -416,6 +438,9 @@ export default function TradePanel({
             <Row k="price after" v={fill.priceAfter} />
             <Row k="your balance" v={`${fmt(fromAtoms(fill.traderTokenBalance), 4)} ${symbol}`} />
             <Row k="reserve" v={`${fmt(fill.reserveSol, 4)} SOL`} />
+            {fill.fundedBy === "launch_wallet" && (
+              <Row k="funded by" v="launch wallet" />
+            )}
           </dl>
           <a
             className="btn mt-3 inline-flex"
@@ -426,6 +451,14 @@ export default function TradePanel({
             view tx on explorer ↗
           </a>
         </div>
+      )}
+
+      {walletEmpty && (
+        <p className="mono mt-2 text-[10px] text-[var(--sim)]">
+          Your wallet holds {fmt((walletSol ?? 0) / 1e9, 4)} SOL. You can still buy — this site&apos;s
+          launch wallet pays and the tokens are delivered to you. Fund it only if you want to trade
+          with your own funds.
+        </p>
       )}
 
       {error && <p className="mono mt-3 text-[11px] text-[var(--danger)]">{error}</p>}

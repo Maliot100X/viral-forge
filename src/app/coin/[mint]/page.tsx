@@ -2,16 +2,7 @@ import { notFound } from "next/navigation";
 import Link from "next/link";
 import { connection } from "next/server";
 import { getCoin } from "@/lib/store";
-import { readCurveState } from "@/lib/onchain";
-import {
-  formatPrice,
-  graduationPct,
-  isGraduated,
-  marketCapLamports,
-  RESERVED_SUPPLY,
-  spotPriceScaled,
-  TOTAL_SUPPLY,
-} from "@/lib/curve";
+import { readMarket } from "@/lib/market";
 import CopyField from "@/components/CopyField";
 import CurveChart from "@/components/CurveChart";
 import TradePanel from "@/components/TradePanel";
@@ -28,54 +19,6 @@ function age(iso: string): string {
   const h = Math.floor(m / 60);
   if (h < 24) return `${h}h ago`;
   return `${Math.floor(h / 24)}d ago`;
-}
-
-/**
- * The market snapshot this page renders, read from the curve account directly.
- *
- * It is read on the server so the first paint already shows real numbers rather
- * than a skeleton. When it is null the coin has no curve, which is rendered as
- * "not tradeable" — never as a price of zero.
- */
-interface MarketSnapshot {
-  exists: boolean;
-  reserveSol: number;
-  tokensOnCurve: string;
-  tokensSold: string;
-  price: string;
-  marketCapSol: number;
-  graduationPct: number;
-  graduated: boolean;
-  address: string;
-}
-
-async function readMarket(coin: {
-  curveAddress?: string;
-}): Promise<{ market: MarketSnapshot | null; error: string | null }> {
-  if (!coin.curveAddress) return { market: null, error: null };
-  try {
-    const state = await readCurveState(coin.curveAddress);
-    const sold = BigInt(TOTAL_SUPPLY) - BigInt(RESERVED_SUPPLY) - BigInt(state.tokenReserve);
-    return {
-      market: {
-        exists: state.exists,
-        reserveSol: Number(state.realSolReserve) / 1e9,
-        tokensOnCurve: state.tokenReserve.toString(),
-        tokensSold: sold.toString(),
-        price: formatPrice(spotPriceScaled(state), 12),
-        marketCapSol: Number(marketCapLamports(state)) / 1e9,
-        graduationPct: graduationPct(state),
-        graduated: isGraduated(state),
-        address: coin.curveAddress,
-      },
-      error: null,
-    };
-  } catch (err) {
-    return {
-      market: null,
-      error: err instanceof Error ? err.message : "rpc_failed",
-    };
-  }
 }
 
 function fmtSol(n: number, digits = 4): string {
